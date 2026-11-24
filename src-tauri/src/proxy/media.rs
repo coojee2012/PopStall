@@ -232,6 +232,7 @@ impl MediaSlot {
         let pumping = slot.clone();
         tokio::spawn(async move {
             if let Err(err) = pump(pumping.clone(), connection, traffic, cancel_rx).await {
+                tracing::warn!(target = %pumping.target, %err, "影音下载中断");
                 *pumping.failed.lock().await = Some(err.to_string());
             }
             pumping.done.store(true, Ordering::Release);
@@ -369,8 +370,16 @@ async fn pump(
     slot.status.store(head.status, Ordering::Release);
     let _ = slot.content_type.send(Some(head.content_type));
     slot.notify.notify_waiters();
+    let started = std::time::Instant::now();
+    tracing::info!(
+        target = %slot.target,
+        status = head.status,
+        bytes = head.content_length.unwrap_or(0),
+        "开始下载影音"
+    );
 
     let mut buf = vec![0u8; 64 * 1024];
+    let mut next_report = 1024 * 1024;
     loop {
         let read = AsyncReadExt::read(&mut recv, &mut buf);
         tokio::pin!(read);
@@ -399,8 +408,19 @@ async fn pump(
             file.flush()?;
             slot.downloaded.fetch_add(size as u64, Ordering::Release);
         }
+        let received = slot.downloaded();
+        if received >= next_report {
+            tracing::info!(target = %slot.target, received, "影音仍在下载");
+            next_report += 1024 * 1024;
+        }
         slot.notify.notify_waiters();
     }
+    tracing::info!(
+        target = %slot.target,
+        received = slot.downloaded(),
+        ms = started.elapsed().as_millis() as u64,
+        "影音下载结束"
+    );
     Ok(())
 }
 

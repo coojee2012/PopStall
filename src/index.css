@@ -19,11 +19,17 @@
 html,
 body,
 #root {
-  min-height: 100%;
+  height: 100%;
+}
+
+.plaza-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #e3d5c3 transparent;
 }
 
 body {
   margin: 0;
+  overflow: hidden;
   background:
     radial-gradient(980px 460px at 6% -14%, rgba(196, 92, 38, 0.14), transparent 56%),
     radial-gradient(760px 380px at 100% -10%, rgba(47, 107, 79, 0.1), transparent 48%),

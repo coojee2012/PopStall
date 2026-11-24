@@ -2,9 +2,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use iroh::endpoint::{QuicTransportConfig, VarInt, presets};
+use futures_util::StreamExt;
+use iroh::endpoint::{Connection, PathEvent, QuicTransportConfig, VarInt, presets};
 use iroh::protocol::Router;
-use iroh::{Endpoint, EndpointAddr, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
 use iroh_tickets::Ticket;
 use iroh_tickets::endpoint::EndpointTicket;
 
@@ -49,7 +50,12 @@ impl Node {
             Some(super::plaza::start(endpoint.clone(), gossip, mdns))
         };
         let router = router.spawn();
-        tracing::info!(endpoint_id = %endpoint.id(), "iroh endpoint is bound");
+        let locals: Vec<String> = endpoint
+            .bound_sockets()
+            .into_iter()
+            .map(|socket| socket.to_string())
+            .collect();
+        tracing::info!(endpoint_id = %endpoint.id(), ?locals, "本机 UDP 已绑定");
         Ok(Self {
             endpoint,
             router,
@@ -103,9 +109,9 @@ impl Node {
     pub fn share_snapshot(&self) -> ShareMaterial {
         let addr = self.endpoint.addr();
         let ready = addr.relay_urls().next().is_some();
-        if let Some(relay) = addr.relay_urls().next() {
-            tracing::info!(%relay, "share code includes a relay");
-        }
+        let relays: Vec<String> = addr.relay_urls().map(|url| url.to_string()).collect();
+        let direct: Vec<String> = addr.ip_addrs().map(|socket| socket.to_string()).collect();
+        tracing::info!(?relays, ?direct, "本机对外地址");
         ShareMaterial {
             code: EndpointTicket::new(addr).encode_string(),
             relay_ready: ready,
@@ -149,14 +155,100 @@ impl Node {
         Ok(())
     }
 
-    async fn dial(&self, addr: EndpointAddr) -> anyhow::Result<iroh::endpoint::Connection> {
+    async fn dial(&self, addr: EndpointAddr) -> anyhow::Result<Connection> {
+        let relays = addr.relay_urls().count();
+        let direct = addr.ip_addrs().count();
+        tracing::info!(remote = %addr.id, relays, direct, "开始拨号");
         match tokio::time::timeout(CONNECT_TIMEOUT, self.endpoint.connect(addr, ALPN)).await {
-            Ok(Ok(connection)) => Ok(connection),
+            Ok(Ok(connection)) => {
+                watch_paths(connection.clone(), "guest");
+                Ok(connection)
+            }
             Ok(Err(err)) => Err(anyhow::anyhow!("P2P 连接失败: {err:?}")),
             Err(_) => Err(anyhow::anyhow!(
                 "P2P 连接超时。对方需要正在开张；跨网第一次握手可能要半分钟"
             )),
         }
+    }
+}
+
+pub(crate) fn watch_paths(connection: Connection, role: &'static str) {
+    let remote = connection.remote_id();
+    tracing::info!(%remote, role, paths = %describe_paths(&connection), "连接已建立");
+    tokio::spawn(async move {
+        let mut events = connection.path_events();
+        loop {
+            match events.next().await {
+                Some(PathEvent::Opened { remote_addr, .. }) => {
+                    log_path(remote, role, &remote_addr, "出现一条路径");
+                }
+                Some(PathEvent::Selected { remote_addr, .. }) => {
+                    log_path(remote, role, &remote_addr, "数据改走这条路径");
+                }
+                Some(PathEvent::Closed {
+                    remote_addr,
+                    last_stats,
+                    ..
+                }) => {
+                    tracing::info!(
+                        %remote,
+                        role,
+                        via = %remote_addr,
+                        kind = path_kind(&remote_addr),
+                        rtt_ms = last_stats.rtt.as_millis() as u64,
+                        sent_bytes = last_stats.udp_tx.bytes,
+                        recv_bytes = last_stats.udp_rx.bytes,
+                        cwnd = last_stats.cwnd,
+                        "路径关闭"
+                    );
+                }
+                Some(PathEvent::Lagged { missed, .. }) => {
+                    tracing::warn!(%remote, role, missed, "路径事件来不及记，漏掉了几条");
+                }
+                Some(_) => {}
+                None => {
+                    tracing::info!(%remote, role, "连接关闭");
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn log_path(remote: EndpointId, role: &str, addr: &TransportAddr, message: &str) {
+    if addr.is_relay() {
+        tracing::info!(%remote, role, via = %addr, "{message}：中继");
+    } else {
+        tracing::info!(%remote, role, via = %addr, "{message}：直连");
+    }
+}
+
+fn path_kind(addr: &TransportAddr) -> &'static str {
+    if addr.is_relay() {
+        "relay"
+    } else if addr.is_ip() {
+        "direct"
+    } else {
+        "other"
+    }
+}
+
+fn describe_paths(connection: &Connection) -> String {
+    let paths = connection.paths();
+    let mut parts = Vec::new();
+    for path in &paths {
+        let selected = if path.is_selected() { "*" } else { "" };
+        let kind = if path.is_relay() { "中继" } else { "直连" };
+        parts.push(format!(
+            "{selected}{kind} {} {}ms",
+            path.remote_addr(),
+            path.rtt().as_millis()
+        ));
+    }
+    if parts.is_empty() {
+        "还没有路径".to_string()
+    } else {
+        parts.join(" | ")
     }
 }
 

@@ -65,6 +65,8 @@ impl ProtocolHandler for StallHandler {
             return Ok(());
         };
         let _permit = permit;
+        super::node::watch_paths(connection.clone(), "host");
+        let peer = connection.remote_id().to_string();
         let stream_slots = Arc::new(Semaphore::new(MAX_STREAMS_PER_VISITOR));
         loop {
             let (send, recv) = match connection.accept_bi().await {
@@ -78,12 +80,13 @@ impl ProtocolHandler for StallHandler {
             let stream_slots = stream_slots.clone();
             let bandwidth = self.bandwidth.clone();
             let traffic = self.traffic.clone();
+            let peer = peer.clone();
             tokio::spawn(async move {
                 if stream_slots.try_acquire_owned().is_err() {
                     let _ = write_text(send, 503, "这个摊位的并发请求已满").await;
                     return;
                 }
-                if let Err(err) = handle_stream(target, bandwidth, traffic, send, recv).await {
+                if let Err(err) = handle_stream(target, bandwidth, traffic, peer, send, recv).await {
                     tracing::warn!(%err, "stall stream failed");
                 }
             });
@@ -96,9 +99,11 @@ async fn handle_stream(
     target: Arc<RwLock<Option<HostTarget>>>,
     bandwidth: Arc<BandwidthLimit>,
     traffic: Arc<Traffic>,
+    peer: String,
     mut send: SendStream,
     mut recv: RecvStream,
 ) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
     let bytes = read_limited(&mut recv, 16 + MAX_TARGET_LEN + MAX_REQUEST_BODY).await?;
     traffic.record_received(bytes.len() as u64);
     let request = match decode_request(&bytes) {
@@ -109,8 +114,10 @@ async fn handle_stream(
         return write_text(send, 503, "摊位已打烊").await;
     };
 
+    let method = request.method;
+    let target_log = request.target.clone();
     let mut builder = Request::builder()
-        .method(request.method.to_http())
+        .method(method.to_http())
         .uri(request.target);
     if let Some(range) = request.range.as_deref() {
         builder = builder.header(header::RANGE, range);
@@ -145,6 +152,7 @@ async fn handle_stream(
     if content_length.is_some_and(|length| length > ceiling) {
         return write_text(send, 413, "响应超过单文件上限").await;
     }
+    let media = is_media_type(&content_type);
     let content_range = headers
         .get(header::CONTENT_RANGE)
         .and_then(|value| value.to_str().ok())
@@ -165,6 +173,7 @@ async fn handle_stream(
 
     let mut body = response.into_body();
     let mut sent = 0u64;
+    let mut next_report = 1024 * 1024;
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|err| anyhow::anyhow!("读取站点响应失败: {err}"))?;
         let Ok(data) = frame.into_data() else {
@@ -177,9 +186,33 @@ async fn handle_stream(
         bandwidth.consume(data.len() as u64).await;
         send.write_all(&data).await?;
         traffic.record_sent(data.len() as u64);
+        if media && sent >= next_report {
+            tracing::info!(%peer, target = %target_log, sent, "影音仍在发送");
+            next_report += 1024 * 1024;
+        }
     }
     send.finish()
         .map_err(|err| anyhow::anyhow!("关闭响应流失败: {err:?}"))?;
+    if media || sent >= 32 * 1024 {
+        tracing::info!(
+            %peer,
+            method = %method.to_http(),
+            target = %target_log,
+            status,
+            bytes = sent,
+            ms = started.elapsed().as_millis() as u64,
+            "发送完成"
+        );
+    } else {
+        tracing::debug!(
+            %peer,
+            method = %method.to_http(),
+            target = %target_log,
+            status,
+            bytes = sent,
+            "发送完成"
+        );
+    }
     Ok(())
 }
 

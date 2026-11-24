@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import * as api from "../lib/api";
+import { rememberVisit } from "../lib/memory";
 import { errorText } from "../lib/utils";
 import type { HostInfo, ScanReport, StageInfo, StallChoice, ThemeId } from "../types/ipc";
 
@@ -21,7 +22,9 @@ type SessionState = {
   port: string;
   blurb: string;
   host: HostInfo | null;
+  openedAt: number | null;
   stage: StageInfo | null;
+  lastSeenId: string | null;
   hostBusy: boolean;
   guestBusy: boolean;
   error: string | null;
@@ -33,7 +36,7 @@ type SessionState = {
   stopHost: () => Promise<void>;
   openPreview: () => Promise<void>;
   openGuest: (shareCode: string) => Promise<void>;
-  openDiscovered: (endpointId: string, title: string) => Promise<void>;
+  openDiscovered: (endpointId: string, title: string, detail?: { label?: string; blurb?: string }) => Promise<void>;
   refreshHost: () => Promise<void>;
   closeStage: () => Promise<void>;
 };
@@ -46,7 +49,9 @@ export const useSession = create<SessionState>((set, get) => ({
   port: "3000",
   blurb: "",
   host: null,
+  openedAt: null,
   stage: null,
+  lastSeenId: null,
   hostBusy: false,
   guestBusy: false,
   error: null,
@@ -93,7 +98,7 @@ export const useSession = create<SessionState>((set, get) => ({
       set({ hostBusy: true, error: null });
       try {
         const host = await api.startHost({ mode: "app", port: parsed, blurb });
-        set({ host });
+        set({ host, openedAt: Date.now() });
       } catch (error) {
         set({ error: errorText(error) });
       } finally {
@@ -108,7 +113,7 @@ export const useSession = create<SessionState>((set, get) => ({
     set({ hostBusy: true, error: null });
     try {
       const host = await api.startHost({ mode: choice, root: folder, blurb });
-      set({ host });
+      set({ host, openedAt: Date.now() });
     } catch (error) {
       set({ error: errorText(error) });
     } finally {
@@ -124,7 +129,7 @@ export const useSession = create<SessionState>((set, get) => ({
         set({ stage: null });
       }
       await api.stopHost();
-      set({ host: null });
+      set({ host: null, openedAt: null });
     } catch (error) {
       set({ error: errorText(error) });
     } finally {
@@ -158,7 +163,10 @@ export const useSession = create<SessionState>((set, get) => ({
     set({ guestBusy: true, error: null });
     try {
       const stage = await api.openGuest(trimmed);
-      set({ stage });
+      if (stage.endpointId) {
+        rememberVisit({ endpointId: stage.endpointId, title: stage.title || "对方的摊位" });
+      }
+      set({ stage, lastSeenId: stage.endpointId ?? null });
     } catch (error) {
       set({ error: errorText(error) });
     } finally {
@@ -166,11 +174,12 @@ export const useSession = create<SessionState>((set, get) => ({
     }
   },
 
-  async openDiscovered(endpointId: string, title: string) {
+  async openDiscovered(endpointId: string, title: string, detail?: { label?: string; blurb?: string }) {
     set({ guestBusy: true, error: null });
     try {
       const stage = await api.openDiscovered(endpointId, title);
-      set({ stage });
+      rememberVisit({ endpointId, title, label: detail?.label, blurb: detail?.blurb });
+      set({ stage, lastSeenId: endpointId });
     } catch (error) {
       set({ error: errorText(error) });
     } finally {
