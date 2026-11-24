@@ -10,6 +10,8 @@ export function GuestPanel({ embedded = false }: { embedded?: boolean }) {
   const busy = useSession((state) => state.guestBusy);
   const openGuest = useSession((state) => state.openGuest);
   const [shareCode, setShareCode] = useState("");
+  const [password, setPassword] = useState("");
+  const [rejected, setRejected] = useState<string | null>(null);
 
   const body = (
     <>
@@ -30,9 +32,29 @@ export function GuestPanel({ embedded = false }: { embedded?: boolean }) {
         spellCheck={false}
         autoFocus={embedded}
       />
+      <input
+        type="password"
+        value={password}
+        autoComplete="off"
+        maxLength={48}
+        placeholder="这间摊如果写了密码"
+        onChange={(event) => setPassword(event.target.value)}
+        className="w-full rounded-full border border-line bg-paper px-4 py-2 text-sm outline-none focus:border-ember"
+      />
+      {rejected ? <p className="text-sm leading-6 text-ember-dark">{rejected}</p> : null}
 
       <div className="flex flex-wrap gap-3">
-        <Button onClick={() => void openGuest(shareCode)} disabled={busy}>
+        <Button
+          onClick={() => {
+            setRejected(null);
+            void openGuest(shareCode, password).then((opened) => {
+              if (!opened) {
+                setRejected(useSession.getState().error);
+              }
+            });
+          }}
+          disabled={busy}
+        >
           {busy ? "正在打开" : "打开摊位"}
         </Button>
       </div>

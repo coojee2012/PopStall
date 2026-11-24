@@ -28,6 +28,7 @@ enum Announce {
         title: String,
         label: String,
         blurb: String,
+        locked: bool,
     },
 }
 
@@ -36,6 +37,7 @@ struct LiveStall {
     title: String,
     label: String,
     blurb: String,
+    locked: bool,
     timestamp: u64,
     expires: Instant,
 }
@@ -47,6 +49,7 @@ pub struct PlazaStall {
     pub title: String,
     pub label: String,
     pub blurb: String,
+    pub locked: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -72,11 +75,12 @@ pub struct Plaza {
 }
 
 impl Plaza {
-    pub fn announce(&self, title: &str, label: &str, blurb: &str) {
+    pub fn announce(&self, title: &str, label: &str, blurb: &str, locked: bool) {
         let _ = self.announce.send(Announce::Open {
             title: card::clip(title, 48),
             label: card::clip(label, 32),
             blurb: card::clip_chars(blurb, card::MAX_BLURB_CHARS),
+            locked,
         });
     }
 
@@ -96,6 +100,7 @@ impl Plaza {
                 title: stall.title.clone(),
                 label: stall.label.clone(),
                 blurb: stall.blurb.clone(),
+                locked: stall.locked,
             })
             .collect();
         listed.sort_by(|left, right| left.title.cmp(&right.title).then(left.endpoint_id.cmp(&right.endpoint_id)));
@@ -312,9 +317,14 @@ async fn publish_current(
     published: &mut bool,
 ) {
     let bytes = match &announce {
-        Announce::Open { title, label, blurb } => {
+        Announce::Open {
+            title,
+            label,
+            blurb,
+            locked,
+        } => {
             *published = true;
-            card::encode_open(secret, title, label, blurb)
+            card::encode_open(secret, title, label, blurb, *locked)
         }
         Announce::Idle if *published => {
             *published = false;
@@ -349,6 +359,7 @@ async fn ingest(
             title,
             label,
             blurb,
+            locked,
             timestamp,
             ttl,
             ..
@@ -365,6 +376,7 @@ async fn ingest(
                     title: title.clone(),
                     label,
                     blurb,
+                    locked,
                     timestamp,
                     expires: Instant::now() + Duration::from_secs(u64::from(ttl.clamp(30, 180))),
                 },
@@ -379,7 +391,7 @@ async fn ingest(
                 }
             }
             if is_new {
-                tracing::info!(%endpoint_id, %title, "plaza saw a stall");
+                tracing::info!(%endpoint_id, %title, locked, "plaza saw a stall");
             }
             Some(endpoint_id)
         }

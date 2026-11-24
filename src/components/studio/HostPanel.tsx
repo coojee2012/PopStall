@@ -23,6 +23,8 @@ export function HostPanel() {
   const port = useSession((state) => state.port);
   const blurb = useSession((state) => state.blurb);
   const setBlurb = useSession((state) => state.setBlurb);
+  const password = useSession((state) => state.password);
+  const setPassword = useSession((state) => state.setPassword);
   const host = useSession((state) => state.host);
   const busy = useSession((state) => state.hostBusy);
   const chooseFolder = useSession((state) => state.chooseFolder);
@@ -75,6 +77,7 @@ export function HostPanel() {
           root={host.root}
           endpointId={host.endpointId}
           relayReady={host.relayReady}
+          locked={host.locked}
           shareCode={host.shareCode}
           copied={copied}
           copyError={copyError}
@@ -170,6 +173,22 @@ export function HostPanel() {
             />
           </label>
 
+          <label className="block">
+            <span className="text-sm">私密摊位的密码</span>
+            <input
+              type="password"
+              value={password}
+              autoComplete="new-password"
+              maxLength={48}
+              placeholder="留空就是公开摊"
+              onChange={(event) => setPassword(event.target.value)}
+              className="mt-2 w-full rounded-full border border-line bg-paper px-4 py-2 text-sm outline-none focus:border-ember"
+            />
+            <span className="mt-2 block text-xs leading-5 text-muted">
+              写了密码，广场上仍看得见摊名和那句话，当作门面。里面的文件要密码才进得去。密码别写进那句话里。
+            </span>
+          </label>
+
           <div className="flex flex-wrap items-center justify-between gap-3">
             <StatusDot tone={busy || scanning ? "busy" : "idle"} label={busy ? "正在准备节点" : scanning ? "正在看文件夹" : "还没有开张"} />
             <Button onClick={() => void startHost()} disabled={busy || scanning || !canOpen(choice, Boolean(folder), Boolean(scan))}>
@@ -232,6 +251,7 @@ function LiveStall({
   root,
   endpointId,
   relayReady,
+  locked,
   shareCode,
   copied,
   copyError,
@@ -244,6 +264,7 @@ function LiveStall({
   root: string;
   endpointId: string;
   relayReady: boolean;
+  locked: boolean;
   shareCode: string;
   copied: boolean;
   copyError: string | null;
@@ -260,7 +281,7 @@ function LiveStall({
             <p className="text-xs tracking-wide text-pine">{modeLabel}</p>
             <p className="mt-1 break-all font-serif text-2xl">{root.split("/").filter(Boolean).pop() || root}</p>
           </div>
-          <StatusDot tone="live" label="营业中" />
+          <StatusDot tone="live" label={locked ? "私密营业" : "营业中"} />
         </div>
         <p className="mt-2 break-all text-xs leading-5 text-muted">{root}</p>
       </div>

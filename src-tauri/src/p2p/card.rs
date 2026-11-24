@@ -17,6 +17,7 @@ pub enum Card {
         title: String,
         label: String,
         blurb: String,
+        locked: bool,
         timestamp: u64,
         ttl: u32,
     },
@@ -25,7 +26,7 @@ pub enum Card {
     },
 }
 
-pub fn encode_open(secret: &SecretKey, title: &str, label: &str, blurb: &str) -> Vec<u8> {
+pub fn encode_open(secret: &SecretKey, title: &str, label: &str, blurb: &str, locked: bool) -> Vec<u8> {
     encode(
         secret,
         KIND_OPEN,
@@ -33,11 +34,12 @@ pub fn encode_open(secret: &SecretKey, title: &str, label: &str, blurb: &str) ->
         &clip(label, MAX_LABEL),
         &clip_chars(blurb, MAX_BLURB_CHARS),
         CARD_TTL_SECS,
+        locked,
     )
 }
 
 pub fn encode_bye(secret: &SecretKey) -> Vec<u8> {
-    encode(secret, KIND_BYE, "", "", "", CARD_TTL_SECS)
+    encode(secret, KIND_BYE, "", "", "", CARD_TTL_SECS, false)
 }
 
 pub fn decode(bytes: &[u8], now: u64) -> Option<Card> {
@@ -48,7 +50,7 @@ pub fn decode(bytes: &[u8], now: u64) -> Option<Card> {
     let signed = &bytes[..signed_len];
     let mut cursor = &bytes[4..signed_len];
     let version = take_u8(&mut cursor)?;
-    if version != 1 && version != VERSION {
+    if version != 1 && version != 2 && version != 3 {
         return None;
     }
     let kind = take_u8(&mut cursor)?;
@@ -63,6 +65,7 @@ pub fn decode(bytes: &[u8], now: u64) -> Option<Card> {
     } else {
         String::new()
     };
+    let locked = if version >= 3 { take_u8(&mut cursor)? == 1 } else { false };
     if !cursor.is_empty() {
         return None;
     }
@@ -84,6 +87,7 @@ pub fn decode(bytes: &[u8], now: u64) -> Option<Card> {
             },
             label,
             blurb,
+            locked,
             timestamp,
             ttl,
         }),
@@ -113,10 +117,10 @@ pub fn clip(text: &str, max: usize) -> String {
     trimmed[..end].to_string()
 }
 
-fn encode(secret: &SecretKey, kind: u8, title: &str, label: &str, blurb: &str, ttl: u32) -> Vec<u8> {
+fn encode(secret: &SecretKey, kind: u8, title: &str, label: &str, blurb: &str, ttl: u32, locked: bool) -> Vec<u8> {
     let mut body = Vec::with_capacity(256);
     body.extend_from_slice(MAGIC);
-    body.push(VERSION);
+    body.push(if locked { 3 } else { VERSION });
     body.push(kind);
     body.extend_from_slice(secret.public().as_bytes());
     body.extend_from_slice(&unix_now().to_be_bytes());
@@ -124,6 +128,9 @@ fn encode(secret: &SecretKey, kind: u8, title: &str, label: &str, blurb: &str, t
     push_str(&mut body, title);
     push_str(&mut body, label);
     push_text(&mut body, blurb);
+    if locked {
+        body.push(1);
+    }
     let signature = secret.sign(&body);
     body.extend_from_slice(&signature.to_bytes());
     body
@@ -192,18 +199,20 @@ mod tests {
     fn open_card_round_trips_and_rejects_tampering() {
         let secret = iroh::SecretKey::generate();
         let blurb = "夜里的爵士 ".repeat(20);
-        let bytes = encode_open(&secret, "海边的图片\n", "图片展厅", &blurb);
+        let bytes = encode_open(&secret, "海边的图片\n", "图片展厅", &blurb, false);
         let card = decode(&bytes, unix_now()).expect("card");
         match card {
             super::Card::Open {
                 title,
                 label,
                 blurb,
+                locked,
                 endpoint_id,
                 ..
             } => {
                 assert_eq!(title, "海边的图片");
                 assert_eq!(label, "图片展厅");
+                assert!(!locked);
                 assert_eq!(blurb.chars().count(), super::MAX_BLURB_CHARS);
                 assert!(blurb.starts_with("夜里的爵士"));
                 assert_eq!(endpoint_id, secret.public());
@@ -214,5 +223,14 @@ mod tests {
         let mut tampered = bytes.clone();
         tampered[51] ^= 0x1;
         assert!(decode(&tampered, unix_now()).is_none());
+
+        let locked_bytes = encode_open(&secret, "南窗", "图片展厅", "只给有密码的人", true);
+        match decode(&locked_bytes, unix_now()).expect("locked card") {
+            super::Card::Open { locked, blurb, .. } => {
+                assert!(locked);
+                assert_eq!(blurb, "只给有密码的人");
+            }
+            super::Card::Bye { .. } => panic!("expected an open card"),
+        }
     }
 }

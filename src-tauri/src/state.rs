@@ -20,6 +20,7 @@ pub struct HostSession {
     pub share_code: String,
     pub endpoint_id: String,
     pub relay_ready: bool,
+    pub locked: bool,
 }
 
 pub struct StageSession {

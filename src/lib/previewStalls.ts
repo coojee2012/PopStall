@@ -6,48 +6,56 @@ const featured: PlazaStall[] = [
     title: "南窗唱片",
     label: "音乐展厅",
     blurb: "夜里的爵士，和一张没放完的民谣",
+    locked: false,
   },
   {
     endpointId: "preview-1",
     title: "慢船书店",
     label: "小说展厅",
     blurb: "短篇，适合睡前。雨声算在里面",
+    locked: true,
   },
   {
     endpointId: "preview-2",
     title: "厨房胶片",
     label: "图片展厅",
     blurb: "晚饭前后的光，没有摆拍",
+    locked: false,
   },
   {
     endpointId: "preview-3",
     title: "二楼放映",
     label: "视频展厅",
     blurb: "自己剪的旅行，可以拖进度",
+    locked: false,
   },
   {
     endpointId: "preview-4",
     title: "木桌文档",
     label: "文档展厅",
     blurb: "几份还没寄出的说明",
+    locked: false,
   },
   {
     endpointId: "preview-5",
     title: "阳台电台",
     label: "音乐展厅",
     blurb: "周日的民谣，音量很小",
+    locked: false,
   },
   {
     endpointId: "preview-6",
     title: "旧磁带",
     label: "音乐展厅",
     blurb: "翻录的现场，有一点底噪",
+    locked: false,
   },
   {
     endpointId: "preview-7",
     title: "未寄出的信",
     label: "小说展厅",
     blurb: "一个人的章节，看到哪算哪",
+    locked: false,
   },
 ];
 
@@ -81,6 +89,7 @@ export function previewStalls(): PlazaStall[] {
       title: branch === 1 ? `${name}·${place}` : `${name}·${place} ${branch}`,
       label: labels[index % labels.length],
       blurb: lines[index % lines.length],
+      locked: index % 17 === 0,
     });
   }
   cache = stalls;

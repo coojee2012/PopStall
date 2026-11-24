@@ -93,7 +93,13 @@ export function sameStalls(left: PlazaStall[], right: PlazaStall[]) {
   for (let index = 0; index < left.length; index += 1) {
     const a = left[index];
     const b = right[index];
-    if (a.endpointId !== b.endpointId || a.title !== b.title || a.label !== b.label || a.blurb !== b.blurb) {
+    if (
+      a.endpointId !== b.endpointId ||
+      a.title !== b.title ||
+      a.label !== b.label ||
+      a.blurb !== b.blurb ||
+      a.locked !== b.locked
+    ) {
       return false;
     }
   }

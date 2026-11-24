@@ -1,5 +1,6 @@
 import { Star } from "lucide-react";
 import { memo, useMemo, useState } from "react";
+import { Button } from "../ui/button";
 import { useKept, togglePin, type KeptStall } from "../../lib/memory";
 import { kindFilters, kindGlyph, kindName, kindWash, matchesQuery, stallKind, type KindFilter } from "../../lib/plaza";
 import { usePlazaStore } from "../../stores/plaza";
@@ -35,6 +36,9 @@ export function PlazaView({ desk, query }: { desk: Desk; query: string }) {
   const openDiscovered = useSession((state) => state.openDiscovered);
   const [kind, setKind] = useState<KindFilter>("all");
   const [sort, setSort] = useState<SortMode>("fresh");
+  const [ask, setAsk] = useState<Entry | null>(null);
+  const [pass, setPass] = useState("");
+  const [passError, setPassError] = useState<string | null>(null);
 
   const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const entries = useMemo(() => buildEntries(stalls, kept, freshUntil), [stalls, kept, freshUntil]);
@@ -45,6 +49,19 @@ export function PlazaView({ desk, query }: { desk: Desk; query: string }) {
   );
 
   const showBanner = desk === "market" && terms.length === 0 && kind === "all" && livePins.length > 0;
+
+  function beginOpen(stall: Entry) {
+    if (!stall.live) {
+      return;
+    }
+    if (stall.locked) {
+      setAsk(stall);
+      setPass("");
+      setPassError(null);
+      return;
+    }
+    void openDiscovered(stall.endpointId, stall.title, { label: stall.label, blurb: stall.blurb });
+  }
 
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -86,7 +103,7 @@ export function PlazaView({ desk, query }: { desk: Desk; query: string }) {
               key={stall.endpointId}
               type="button"
               disabled={busy}
-              onClick={() => void openDiscovered(stall.endpointId, stall.title, { label: stall.label, blurb: stall.blurb })}
+              onClick={() => beginOpen(stall)}
               className="max-w-40 truncate rounded-full bg-card px-3 py-1 font-serif text-sm text-ink disabled:opacity-50"
             >
               {stall.title}
@@ -114,13 +131,63 @@ export function PlazaView({ desk, query }: { desk: Desk; query: string }) {
                   stall={row.stall}
                   busy={busy}
                   justSeen={row.stall.endpointId === lastSeenId}
-                  onOpen={() => void openDiscovered(row.stall.endpointId, row.stall.title, { label: row.stall.label, blurb: row.stall.blurb })}
+                  onOpen={() => beginOpen(row.stall)}
                 />
               )
             }
           />
         )}
       </div>
+      {ask ? (
+        <div className="fixed inset-0 z-30 flex items-start justify-center bg-ink/30 px-4 pt-[14vh]" onMouseDown={() => setAsk(null)}>
+          <form
+            className="w-full max-w-md rounded-3xl border border-line bg-card px-6 py-6 shadow-[0_24px_60px_rgba(36,25,16,0.16)]"
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              const stall = ask;
+              const password = pass.trim();
+              if (!password) {
+                setPassError("先写密码");
+                return;
+              }
+              setPassError(null);
+              void openDiscovered(stall.endpointId, stall.title, {
+                label: stall.label,
+                blurb: stall.blurb,
+                password,
+              }).then((opened) => {
+                if (opened) {
+                  setAsk(null);
+                  return;
+                }
+                setPassError(useSession.getState().error ?? "密码不对");
+              });
+            }}
+          >
+            <h2 className="font-serif text-2xl">进入{ask.title}</h2>
+            <p className="mt-2 text-sm leading-6 text-muted">这是私密摊位。广场上的那句话谁都看得见，里面的内容要密码。</p>
+            <input
+              type="password"
+              value={pass}
+              autoFocus
+              autoComplete="off"
+              maxLength={48}
+              onChange={(event) => setPass(event.target.value)}
+              className="mt-4 w-full rounded-full border border-line bg-paper px-4 py-2 text-sm outline-none focus:border-ember"
+            />
+            {passError ? <p className="mt-3 text-sm text-ember-dark">{passError}</p> : null}
+            <div className="mt-4 flex gap-3">
+              <Button type="submit" disabled={busy || pass.trim().length === 0}>
+                {busy ? "正在确认" : "进去"}
+              </Button>
+              <Button variant="quiet" type="button" onClick={() => setAsk(null)}>
+                取消
+              </Button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -159,7 +226,9 @@ const StallRow = memo(function StallRow({
 }) {
   const kind = stallKind(stall.label);
   const fresh = stall.live && stall.freshAt > Date.now();
-  const meta = [stall.label || kindName(kind), fresh ? "刚出现" : null, justSeen ? "刚刚看过" : null].filter(Boolean).join(" · ");
+  const meta = [stall.label || kindName(kind), stall.locked ? "要密码" : null, fresh ? "刚出现" : null, justSeen ? "刚刚看过" : null]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div
@@ -227,6 +296,7 @@ function buildEntries(stalls: PlazaStall[], kept: KeptStall[], freshUntil: Recor
       title: row.title,
       label: row.label,
       blurb: row.blurb,
+      locked: false,
       live: false,
       freshAt: 0,
       pinned: row.pinned,

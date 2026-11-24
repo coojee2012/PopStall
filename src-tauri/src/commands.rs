@@ -20,6 +20,7 @@ pub struct HostInfo {
     pub root: String,
     pub relay_ready: bool,
     pub mode_label: String,
+    pub locked: bool,
 }
 
 #[tauri::command]
@@ -38,8 +39,9 @@ pub async fn start_host(
     root: Option<String>,
     port: Option<u16>,
     blurb: Option<String>,
+    password: Option<String>,
 ) -> Result<HostInfo, String> {
-    start_host_inner(&state, mode, root, port, blurb.unwrap_or_default())
+    start_host_inner(&state, mode, root, port, blurb.unwrap_or_default(), password.unwrap_or_default())
         .await
         .map_err(|err| err.to_string())
 }
@@ -66,8 +68,21 @@ pub async fn host_status(state: State<'_, AppState>) -> Result<Option<HostInfo>,
             root: session.site.root_label.clone(),
             relay_ready: session.relay_ready,
             mode_label: session.site.mode_label.clone(),
+            locked: session.locked,
         }
     }))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteStatus {
+    pub relay_only: bool,
+}
+
+#[tauri::command]
+pub async fn route_status(state: State<'_, AppState>) -> Result<RouteStatus, String> {
+    let relay_only = state.started_node().is_some_and(|node| node.relay_only());
+    Ok(RouteStatus { relay_only })
 }
 
 #[tauri::command]
@@ -101,8 +116,9 @@ pub async fn open_discovered(
     state: State<'_, AppState>,
     endpoint_id: String,
     title: String,
+    password: Option<String>,
 ) -> Result<StageInfo, String> {
-    open_discovered_inner(&app, &state, endpoint_id, title)
+    open_discovered_inner(&app, &state, endpoint_id, title, password.unwrap_or_default())
         .await
         .map_err(|err| err.to_string())
 }
@@ -133,8 +149,9 @@ pub async fn open_guest(
     app: AppHandle,
     state: State<'_, AppState>,
     share_code: String,
+    password: Option<String>,
 ) -> Result<StageInfo, String> {
-    open_guest_inner(&app, &state, share_code)
+    open_guest_inner(&app, &state, share_code, password.unwrap_or_default())
         .await
         .map_err(|err| err.to_string())
 }
@@ -172,18 +189,21 @@ async fn start_host_inner(
     root: Option<String>,
     port: Option<u16>,
     blurb: String,
+    password: String,
 ) -> anyhow::Result<HostInfo> {
     let _operation = state.host_ops.lock().await;
     let spec = prepare_spec(mode, root, port).await?;
     stop_locked(state).await?;
+    let password = normalize_password(&password)?;
     let node = state.node().await?;
     let site = StaticHost::open(spec).await?;
     node.set_host(HostTarget {
         router: site.router.clone(),
+        password: password.clone(),
     })
     .await;
     let (title, label) = stall_blurb(&site);
-    node.announce_stall(&title, &label, &blurb);
+    node.announce_stall(&title, &label, &blurb, password.is_some());
     let material = node.share_material().await;
     let info = HostInfo {
         share_code: material.code.clone(),
@@ -192,12 +212,14 @@ async fn start_host_inner(
         root: site.root_label.clone(),
         relay_ready: material.relay_ready,
         mode_label: site.mode_label.clone(),
+        locked: password.is_some(),
     };
     *state.host.lock().await = Some(HostSession {
         site,
         share_code: material.code,
         endpoint_id: material.endpoint_id,
         relay_ready: material.relay_ready,
+        locked: password.is_some(),
     });
     Ok(info)
 }
@@ -314,15 +336,17 @@ async fn open_guest_inner(
     app: &AppHandle,
     state: &AppState,
     share_code: String,
+    password: String,
 ) -> anyhow::Result<StageInfo> {
     let share_code = share_code.trim().to_string();
     if share_code.is_empty() {
         anyhow::bail!("先粘贴对方的分享码");
     }
+    let password = normalize_password(&password)?.unwrap_or_default();
     let endpoint_id = Node::endpoint_id_of(&share_code)?;
     let node = state.node().await?;
     let connection = node.connect(&share_code).await?;
-    open_connection_stage(app, state, connection, "对方的摊位", endpoint_id).await
+    open_connection_stage(app, state, connection, "对方的摊位", endpoint_id, password).await
 }
 
 async fn open_discovered_inner(
@@ -330,6 +354,7 @@ async fn open_discovered_inner(
     state: &AppState,
     endpoint_id: String,
     title: String,
+    password: String,
 ) -> anyhow::Result<StageInfo> {
     let endpoint_id = endpoint_id.trim().to_string();
     if endpoint_id.is_empty() {
@@ -341,9 +366,10 @@ async fn open_discovered_inner(
     } else {
         title
     };
+    let password = normalize_password(&password)?.unwrap_or_default();
     let node = state.node().await?;
     let connection = node.connect_endpoint(&endpoint_id).await?;
-    open_connection_stage(app, state, connection, title, endpoint_id).await
+    open_connection_stage(app, state, connection, title, endpoint_id, password).await
 }
 
 async fn open_connection_stage(
@@ -352,9 +378,14 @@ async fn open_connection_stage(
     connection: iroh::endpoint::Connection,
     title: &str,
     endpoint_id: String,
+    password: String,
 ) -> anyhow::Result<StageInfo> {
+    if let Err(err) = check_password(&connection, &password).await {
+        connection.close(0u8.into(), b"password");
+        return Err(err);
+    }
     let traffic = state.node().await?.traffic();
-    let proxy = GuestProxy::start(connection.clone(), traffic).await?;
+    let proxy = GuestProxy::start(connection.clone(), traffic, password).await?;
     let label = next_stage_label();
     let proxy_url = proxy.url();
     if let Err(err) = attach_stage(app, &label, &proxy_url, proxy.port) {
@@ -373,6 +404,48 @@ async fn open_connection_stage(
         kind: "guest".to_string(),
         endpoint_id: Some(endpoint_id),
     })
+}
+
+fn normalize_password(raw: &str) -> anyhow::Result<Option<String>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > 48 {
+        anyhow::bail!("密码最多 48 个字");
+    }
+    if trimmed.chars().any(|ch| ch.is_control()) {
+        anyhow::bail!("密码里不能有控制字符");
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+async fn check_password(connection: &iroh::endpoint::Connection, password: &str) -> anyhow::Result<()> {
+    if password.is_empty() {
+        return Ok(());
+    }
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .map_err(|err| anyhow::anyhow!("打开加密流失败: {err:?}"))?;
+    let frame = crate::p2p::encode_request(&crate::p2p::RequestFrame {
+        method: crate::p2p::Method::Get,
+        target: "/".into(),
+        range: None,
+        content_type: None,
+        body: Vec::new(),
+        pass: password.to_string(),
+    })?;
+    send.write_all(&frame).await?;
+    send.finish()
+        .map_err(|err| anyhow::anyhow!("结束密码确认失败: {err:?}"))?;
+    let head = crate::p2p::read_response_head(&mut recv).await?;
+    if head.status != 401 {
+        return Ok(());
+    }
+    let body = recv.read_to_end(256).await.unwrap_or_default();
+    let message = String::from_utf8_lossy(&body).trim().to_string();
+    anyhow::bail!(if message.is_empty() { "密码不对".to_string() } else { message })
 }
 
 fn stall_blurb(site: &StaticHost) -> (String, String) {

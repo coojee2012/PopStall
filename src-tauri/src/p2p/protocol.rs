@@ -11,6 +11,7 @@ use tower::ServiceExt;
 
 use super::frame::{ResponseHead, decode_request, encode_response_head};
 use super::io::read_limited;
+use super::node::RouteBook;
 use super::traffic::Traffic;
 use crate::security::{
     BANDWIDTH_BYTES_PER_SEC, BandwidthLimit, MAX_MEDIA_BYTES, MAX_REQUEST_BODY, MAX_RESPONSE_BYTES,
@@ -20,6 +21,7 @@ use crate::security::{
 #[derive(Clone)]
 pub struct HostTarget {
     pub router: Router,
+    pub password: Option<String>,
 }
 
 #[derive(Clone)]
@@ -28,15 +30,17 @@ pub struct StallHandler {
     bandwidth: Arc<BandwidthLimit>,
     target: Arc<RwLock<Option<HostTarget>>>,
     traffic: Arc<Traffic>,
+    routes: Arc<RouteBook>,
 }
 
 impl StallHandler {
-    pub fn new(traffic: Arc<Traffic>) -> Self {
+    pub fn new(traffic: Arc<Traffic>, routes: Arc<RouteBook>) -> Self {
         Self {
             visitors: Arc::new(Semaphore::new(MAX_VISITORS)),
             bandwidth: Arc::new(BandwidthLimit::new(BANDWIDTH_BYTES_PER_SEC)),
             target: Arc::new(RwLock::new(None)),
             traffic,
+            routes,
         }
     }
 
@@ -65,7 +69,7 @@ impl ProtocolHandler for StallHandler {
             return Ok(());
         };
         let _permit = permit;
-        super::node::watch_paths(connection.clone(), "host");
+        super::node::watch_paths(connection.clone(), "host", self.routes.clone());
         let peer = connection.remote_id().to_string();
         let stream_slots = Arc::new(Semaphore::new(MAX_STREAMS_PER_VISITOR));
         loop {
@@ -113,6 +117,9 @@ async fn handle_stream(
     let Some(host) = target.read().await.clone() else {
         return write_text(send, 503, "摊位已打烊").await;
     };
+    if let Err(message) = gate(&host.password, &request.pass) {
+        return write_text(send, 401, message).await;
+    }
 
     let method = request.method;
     let target_log = request.target.clone();
@@ -214,6 +221,31 @@ async fn handle_stream(
         );
     }
     Ok(())
+}
+
+fn gate(expected: &Option<String>, given: &str) -> Result<(), &'static str> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let given = given.trim();
+    if given.is_empty() {
+        return Err("这间摊要密码");
+    }
+    if !same_secret(expected.as_bytes(), given.as_bytes()) {
+        return Err("密码不对");
+    }
+    Ok(())
+}
+
+fn same_secret(left: &[u8], right: &[u8]) -> bool {
+    let mut diff = left.len() ^ right.len();
+    let width = left.len().max(right.len());
+    for index in 0..width {
+        let a = left.get(index).copied().unwrap_or(0);
+        let b = right.get(index).copied().unwrap_or(0);
+        diff |= usize::from(a ^ b);
+    }
+    diff == 0
 }
 
 fn is_media_type(content_type: &str) -> bool {

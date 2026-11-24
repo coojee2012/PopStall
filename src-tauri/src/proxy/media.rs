@@ -30,6 +30,7 @@ struct HubInner {
     slots: Mutex<Vec<Arc<MediaSlot>>>,
     connection: Connection,
     traffic: Arc<Traffic>,
+    password: String,
 }
 
 static MEDIA_FILE_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -106,12 +107,13 @@ pub fn parse_byte_range(header: &str) -> Option<ByteRange> {
 }
 
 impl MediaHub {
-    pub fn new(connection: Connection, traffic: Arc<Traffic>) -> Self {
+    pub fn new(connection: Connection, traffic: Arc<Traffic>, password: String) -> Self {
         Self {
             inner: Arc::new(HubInner {
                 slots: Mutex::new(Vec::new()),
                 connection,
                 traffic,
+                password,
             }),
         }
     }
@@ -204,6 +206,7 @@ impl MediaHub {
             target.to_string(),
             self.inner.connection.clone(),
             self.inner.traffic.clone(),
+            self.inner.password.clone(),
         );
         slots.push(slot.clone());
         slot
@@ -211,7 +214,7 @@ impl MediaHub {
 }
 
 impl MediaSlot {
-    fn start(target: String, connection: Connection, traffic: Arc<Traffic>) -> Arc<Self> {
+    fn start(target: String, connection: Connection, traffic: Arc<Traffic>, password: String) -> Arc<Self> {
         let (content_type, _) = watch::channel(None);
         let (cancel, cancel_rx) = watch::channel(false);
         let seq = MEDIA_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -231,7 +234,7 @@ impl MediaSlot {
         });
         let pumping = slot.clone();
         tokio::spawn(async move {
-            if let Err(err) = pump(pumping.clone(), connection, traffic, cancel_rx).await {
+            if let Err(err) = pump(pumping.clone(), connection, traffic, password, cancel_rx).await {
                 tracing::warn!(target = %pumping.target, %err, "影音下载中断");
                 *pumping.failed.lock().await = Some(err.to_string());
             }
@@ -335,6 +338,7 @@ async fn pump(
     slot: Arc<MediaSlot>,
     connection: Connection,
     traffic: Arc<Traffic>,
+    password: String,
     mut cancel: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let (mut send, mut recv) = connection
@@ -347,6 +351,7 @@ async fn pump(
         range: None,
         content_type: None,
         body: Vec::new(),
+        pass: password,
     })?;
     let cache = std::fs::OpenOptions::new()
         .read(true)
@@ -361,6 +366,12 @@ async fn pump(
     send.finish()
         .map_err(|err| anyhow::anyhow!("结束影音请求失败: {err:?}"))?;
     let head = read_response_head(&mut recv).await?;
+    if head.status == 401 {
+        let message = recv.read_to_end(256).await.unwrap_or_default();
+        let text = String::from_utf8_lossy(&message);
+        let text = text.trim();
+        anyhow::bail!("{}", if text.is_empty() { "密码不对" } else { text });
+    }
     if let Some(len) = head.content_length {
         if len > MAX_MEDIA_BYTES {
             anyhow::bail!("这个影音超过 32 GB");

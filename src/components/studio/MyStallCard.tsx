@@ -46,7 +46,7 @@ export function MyStallCard({ active, onOpen }: { active: boolean; onOpen: () =>
                 <span className="absolute inline-flex size-full animate-ping rounded-full bg-pine opacity-60 motion-reduce:animate-none" />
                 <span className="relative size-2 rounded-full bg-pine" />
               </span>
-              营业中
+              {host.locked ? "私密营业" : "营业中"}
             </span>
             <span className="mt-1 block truncate font-serif text-xl">{stallName(host.root)}</span>
             <span className="mt-1 block truncate text-xs text-muted">

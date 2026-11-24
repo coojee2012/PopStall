@@ -2,6 +2,7 @@ import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { placeStage } from "../../lib/api";
 import { useSession } from "../../stores/session";
+import { RouteBanner } from "./RouteBanner";
 import { TrafficMeter } from "./TrafficMeter";
 
 export function StageView() {
@@ -68,6 +69,7 @@ export function StageView() {
           <p className="text-xs tracking-wide text-muted">{stage.kind === "guest" ? "串门" : "本机预览"}</p>
         </div>
       </header>
+      <RouteBanner />
       <div ref={slot} className="min-h-0 flex-1 bg-paper" />
     </div>
   );

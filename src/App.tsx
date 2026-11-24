@@ -6,9 +6,11 @@ import { PlazaView } from "./components/directory/PlazaView";
 import { CodeDialog } from "./components/studio/CodeDialog";
 import { HostPanel } from "./components/studio/HostPanel";
 import { MyStallCard } from "./components/studio/MyStallCard";
+import { RouteBanner } from "./components/studio/RouteBanner";
 import { StageView } from "./components/studio/StageView";
 import { TrafficMeter } from "./components/studio/TrafficMeter";
 import { usePlazaStore, startPlaza } from "./stores/plaza";
+import { startRoute } from "./stores/route";
 import { useSession } from "./stores/session";
 import { cn } from "./lib/utils";
 
@@ -26,6 +28,7 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => startPlaza(), []);
+  useEffect(() => startRoute(), []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -113,6 +116,7 @@ export default function App() {
         </p>
       )}
       {error ? <p className="border-b border-line bg-clay px-5 py-2 text-sm leading-6 text-ember-dark">{error}</p> : null}
+      {stage ? null : <RouteBanner />}
 
       <div className="flex min-h-0 flex-1">
         <aside className="plaza-scroll flex min-h-0 w-[15.25rem] shrink-0 flex-col overflow-y-auto border-r border-line bg-card/60">

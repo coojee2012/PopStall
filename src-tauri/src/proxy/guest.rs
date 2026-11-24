@@ -26,10 +26,10 @@ pub struct GuestProxy {
 }
 
 impl GuestProxy {
-    pub async fn start(connection: Connection, traffic: Arc<Traffic>) -> anyhow::Result<Self> {
+    pub async fn start(connection: Connection, traffic: Arc<Traffic>, password: String) -> anyhow::Result<Self> {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
         let port = listener.local_addr()?.port();
-        let media = MediaHub::new(connection.clone(), traffic.clone());
+        let media = MediaHub::new(connection.clone(), traffic.clone(), password.clone());
         let app = Router::new()
             .fallback(forward)
             .with_state(ProxyState {
@@ -37,6 +37,7 @@ impl GuestProxy {
                 port,
                 traffic,
                 media,
+                password,
             });
         let (shutdown, mut stop) = watch::channel(false);
         tokio::spawn(async move {
@@ -77,6 +78,7 @@ struct ProxyState {
     port: u16,
     traffic: Arc<Traffic>,
     media: MediaHub,
+    password: String,
 }
 
 async fn forward(State(state): State<ProxyState>, request: Request) -> Response {
@@ -125,6 +127,7 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
         range,
         content_type,
         body: if carries_body { body } else { Vec::new() },
+        pass: state.password.clone(),
     }) {
         Ok(frame) => frame,
         Err(err) => return locked(StatusCode::BAD_REQUEST, &err.to_string()),

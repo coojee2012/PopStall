@@ -1,8 +1,10 @@
 use crate::security::{MAX_REQUEST_BODY, MAX_TARGET_LEN, SafePathError, validate_target};
 
 pub const MAGIC_REQUEST: &[u8; 4] = b"PSH2";
+pub const MAGIC_REQUEST_PASS: &[u8; 4] = b"PSH3";
 pub const MAGIC_RESPONSE: &[u8; 4] = b"PSR2";
 const MAX_HEADER_TOKEN: usize = 256;
+const MAX_PASS: usize = 192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
@@ -81,6 +83,7 @@ pub struct RequestFrame {
     pub range: Option<String>,
     pub content_type: Option<String>,
     pub body: Vec<u8>,
+    pub pass: String,
 }
 
 impl RequestFrame {
@@ -91,6 +94,7 @@ impl RequestFrame {
             range: None,
             content_type: None,
             body: Vec::new(),
+            pass: String::new(),
         }
     }
 }
@@ -134,27 +138,49 @@ pub fn encode_request(frame: &RequestFrame) -> Result<Vec<u8>, FrameError> {
     }
     let range = checked_token(frame.range.as_deref())?;
     let content_type = checked_token(frame.content_type.as_deref())?;
-    let mut out = Vec::with_capacity(13 + target.len() + range.len() + content_type.len() + frame.body.len());
-    out.extend_from_slice(MAGIC_REQUEST);
+    let pass = frame.pass.trim();
+    if !pass.is_empty() && (!token_is_safe(pass) || pass.len() > MAX_PASS) {
+        return Err(FrameError::Malformed);
+    }
+    let mut out = Vec::with_capacity(13 + target.len() + range.len() + content_type.len() + pass.len() + frame.body.len());
+    out.extend_from_slice(if pass.is_empty() { MAGIC_REQUEST } else { MAGIC_REQUEST_PASS });
     out.push(frame.method.code());
     push_u16_bytes(&mut out, target);
     push_u16_bytes(&mut out, range);
     push_u16_bytes(&mut out, content_type);
+    if !pass.is_empty() {
+        push_u16_bytes(&mut out, pass.as_bytes());
+    }
     out.extend_from_slice(&(frame.body.len() as u32).to_be_bytes());
     out.extend_from_slice(&frame.body);
     Ok(out)
 }
 
 pub fn decode_request(buf: &[u8]) -> Result<RequestFrame, FrameError> {
-    if buf.len() < 13 || &buf[0..4] != MAGIC_REQUEST {
+    if buf.len() < 13 {
         return Err(FrameError::Malformed);
     }
+    let with_pass = if &buf[0..4] == MAGIC_REQUEST {
+        false
+    } else if &buf[0..4] == MAGIC_REQUEST_PASS {
+        true
+    } else {
+        return Err(FrameError::Malformed);
+    };
     let mut cursor = 4;
     let method = Method::from_code(read_u8(buf, &mut cursor)?).ok_or(FrameError::Malformed)?;
     let target = read_str(buf, &mut cursor, MAX_TARGET_LEN)?;
     validate_target(&target)?;
     let range = optional_token(read_str(buf, &mut cursor, MAX_HEADER_TOKEN)?)?;
     let content_type = optional_token(read_str(buf, &mut cursor, MAX_HEADER_TOKEN)?)?;
+    let pass = if with_pass {
+        read_str(buf, &mut cursor, MAX_PASS)?
+    } else {
+        String::new()
+    };
+    if !pass.is_empty() && !token_is_safe(&pass) {
+        return Err(FrameError::Malformed);
+    }
     if cursor + 4 > buf.len() {
         return Err(FrameError::Malformed);
     }
@@ -169,6 +195,7 @@ pub fn decode_request(buf: &[u8]) -> Result<RequestFrame, FrameError> {
         range,
         content_type,
         body: buf[cursor..].to_vec(),
+        pass,
     })
 }
 
@@ -273,9 +300,17 @@ mod tests {
             range: Some("bytes=0-3".into()),
             content_type: Some("text/plain".into()),
             body: b"ping".to_vec(),
+            pass: String::new(),
         };
         let bytes = encode_request(&frame).unwrap();
+        assert_eq!(&bytes[0..4], MAGIC_REQUEST);
         assert_eq!(decode_request(&bytes).unwrap(), frame);
+
+        let mut locked = frame.clone();
+        locked.pass = "夜里的口令".into();
+        let bytes = encode_request(&locked).unwrap();
+        assert_eq!(&bytes[0..4], MAGIC_REQUEST_PASS);
+        assert_eq!(decode_request(&bytes).unwrap(), locked);
     }
 
     #[test]

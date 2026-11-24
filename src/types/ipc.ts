@@ -17,6 +17,7 @@ export type HostInfo = {
   root: string;
   relayReady: boolean;
   modeLabel: string;
+  locked: boolean;
 };
 
 export type StageInfo = {
@@ -33,6 +34,7 @@ export type PlazaStall = {
   title: string;
   label: string;
   blurb: string;
+  locked: boolean;
 };
 
 export type PlazaSnapshot = {
@@ -43,4 +45,8 @@ export type PlazaSnapshot = {
 export type TrafficSnapshot = {
   sent: number;
   received: number;
+};
+
+export type RouteStatus = {
+  relayOnly: boolean;
 };

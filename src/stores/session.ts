@@ -21,6 +21,7 @@ type SessionState = {
   choice: StallChoice | null;
   port: string;
   blurb: string;
+  password: string;
   host: HostInfo | null;
   openedAt: number | null;
   stage: StageInfo | null;
@@ -32,11 +33,16 @@ type SessionState = {
   setChoice: (choice: StallChoice) => void;
   setPort: (port: string) => void;
   setBlurb: (blurb: string) => void;
+  setPassword: (password: string) => void;
   startHost: () => Promise<void>;
   stopHost: () => Promise<void>;
   openPreview: () => Promise<void>;
-  openGuest: (shareCode: string) => Promise<void>;
-  openDiscovered: (endpointId: string, title: string, detail?: { label?: string; blurb?: string }) => Promise<void>;
+  openGuest: (shareCode: string, password?: string) => Promise<boolean>;
+  openDiscovered: (
+    endpointId: string,
+    title: string,
+    detail?: { label?: string; blurb?: string; password?: string },
+  ) => Promise<boolean>;
   refreshHost: () => Promise<void>;
   closeStage: () => Promise<void>;
 };
@@ -48,6 +54,7 @@ export const useSession = create<SessionState>((set, get) => ({
   choice: null,
   port: "3000",
   blurb: "",
+  password: "",
   host: null,
   openedAt: null,
   stage: null,
@@ -83,8 +90,12 @@ export const useSession = create<SessionState>((set, get) => ({
     set({ blurb: Array.from(blurb).slice(0, 100).join("") });
   },
 
+  setPassword(password) {
+    set({ password: Array.from(password).slice(0, 48).join("") });
+  },
+
   async startHost() {
-    const { folder, choice, port, blurb } = get();
+    const { folder, choice, port, blurb, password } = get();
     if (!choice) {
       set({ error: "先选一种开张方式" });
       return;
@@ -97,7 +108,7 @@ export const useSession = create<SessionState>((set, get) => ({
       }
       set({ hostBusy: true, error: null });
       try {
-        const host = await api.startHost({ mode: "app", port: parsed, blurb });
+        const host = await api.startHost({ mode: "app", port: parsed, blurb, password });
         set({ host, openedAt: Date.now() });
       } catch (error) {
         set({ error: errorText(error) });
@@ -112,7 +123,7 @@ export const useSession = create<SessionState>((set, get) => ({
     }
     set({ hostBusy: true, error: null });
     try {
-      const host = await api.startHost({ mode: choice, root: folder, blurb });
+      const host = await api.startHost({ mode: choice, root: folder, blurb, password });
       set({ host, openedAt: Date.now() });
     } catch (error) {
       set({ error: errorText(error) });
@@ -154,34 +165,38 @@ export const useSession = create<SessionState>((set, get) => ({
     }
   },
 
-  async openGuest(shareCode: string) {
+  async openGuest(shareCode: string, password?: string) {
     const trimmed = shareCode.trim();
     if (!trimmed) {
       set({ error: "先粘贴对方的分享码" });
-      return;
+      return false;
     }
     set({ guestBusy: true, error: null });
     try {
-      const stage = await api.openGuest(trimmed);
+      const stage = await api.openGuest(trimmed, password);
       if (stage.endpointId) {
         rememberVisit({ endpointId: stage.endpointId, title: stage.title || "对方的摊位" });
       }
       set({ stage, lastSeenId: stage.endpointId ?? null });
+      return true;
     } catch (error) {
       set({ error: errorText(error) });
+      return false;
     } finally {
       set({ guestBusy: false });
     }
   },
 
-  async openDiscovered(endpointId: string, title: string, detail?: { label?: string; blurb?: string }) {
+  async openDiscovered(endpointId: string, title: string, detail?: { label?: string; blurb?: string; password?: string }) {
     set({ guestBusy: true, error: null });
     try {
-      const stage = await api.openDiscovered(endpointId, title);
+      const stage = await api.openDiscovered(endpointId, title, detail?.password);
       rememberVisit({ endpointId, title, label: detail?.label, blurb: detail?.blurb });
       set({ stage, lastSeenId: endpointId });
+      return true;
     } catch (error) {
       set({ error: errorText(error) });
+      return false;
     } finally {
       set({ guestBusy: false });
     }

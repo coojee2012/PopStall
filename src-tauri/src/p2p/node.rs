@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use iroh::endpoint::{Connection, PathEvent, QuicTransportConfig, VarInt, presets};
@@ -17,6 +18,33 @@ use crate::storage::load_or_create_secret_key;
 pub const ALPN: &[u8] = b"popstall/http/1";
 const RELAY_WAIT: Duration = Duration::from_secs(12);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
+const RELAY_NOTICE_AFTER: Duration = Duration::from_secs(8);
+
+#[derive(Default)]
+pub struct RouteBook {
+    live: Mutex<HashMap<String, bool>>,
+}
+
+impl RouteBook {
+    pub fn set(&self, id: &str, relay_only: bool) {
+        if let Ok(mut live) = self.live.lock() {
+            live.insert(id.to_string(), relay_only);
+        }
+    }
+
+    pub fn clear(&self, id: &str) {
+        if let Ok(mut live) = self.live.lock() {
+            live.remove(id);
+        }
+    }
+
+    pub fn relay_only(&self) -> bool {
+        self.live
+            .lock()
+            .map(|live| live.values().any(|flag| *flag))
+            .unwrap_or(false)
+    }
+}
 
 pub struct ShareMaterial {
     pub code: String,
@@ -31,6 +59,7 @@ pub struct Node {
     pub router: Router,
     handler: StallHandler,
     traffic: Arc<Traffic>,
+    routes: Arc<RouteBook>,
     plaza: Option<Plaza>,
 }
 
@@ -38,7 +67,8 @@ impl Node {
     pub async fn start(data_dir: &Path) -> anyhow::Result<Self> {
         let secret_key = load_or_create_secret_key(data_dir)?;
         let traffic = Arc::new(Traffic::default());
-        let handler = StallHandler::new(traffic.clone());
+        let routes = Arc::new(RouteBook::default());
+        let handler = StallHandler::new(traffic.clone(), routes.clone());
         let endpoint = bind_endpoint(secret_key).await?;
         let mut router = Router::builder(endpoint.clone()).accept(ALPN, handler.clone());
         let plaza = if cfg!(test) {
@@ -61,6 +91,7 @@ impl Node {
             router,
             handler,
             traffic,
+            routes,
             plaza,
         })
     }
@@ -77,10 +108,14 @@ impl Node {
         self.handler.clear_host().await;
     }
 
-    pub fn announce_stall(&self, title: &str, label: &str, blurb: &str) {
+    pub fn announce_stall(&self, title: &str, label: &str, blurb: &str, locked: bool) {
         if let Some(plaza) = &self.plaza {
-            plaza.announce(title, label, blurb);
+            plaza.announce(title, label, blurb, locked);
         }
+    }
+
+    pub fn relay_only(&self) -> bool {
+        self.routes.relay_only()
     }
 
     pub fn retract_stall(&self) {
@@ -161,7 +196,7 @@ impl Node {
         tracing::info!(remote = %addr.id, relays, direct, "开始拨号");
         match tokio::time::timeout(CONNECT_TIMEOUT, self.endpoint.connect(addr, ALPN)).await {
             Ok(Ok(connection)) => {
-                watch_paths(connection.clone(), "guest");
+                watch_paths(connection.clone(), "guest", self.routes.clone());
                 Ok(connection)
             }
             Ok(Err(err)) => Err(anyhow::anyhow!("P2P 连接失败: {err:?}")),
@@ -172,47 +207,87 @@ impl Node {
     }
 }
 
-pub(crate) fn watch_paths(connection: Connection, role: &'static str) {
+pub(crate) fn watch_paths(connection: Connection, role: &'static str, routes: Arc<RouteBook>) {
     let remote = connection.remote_id();
+    let key = remote.to_string();
     tracing::info!(%remote, role, paths = %describe_paths(&connection), "连接已建立");
+    let mut relay_since = (selected_is_relay(&connection) == Some(true)).then(Instant::now);
     tokio::spawn(async move {
         let mut events = connection.path_events();
         loop {
-            match events.next().await {
-                Some(PathEvent::Opened { remote_addr, .. }) => {
-                    log_path(remote, role, &remote_addr, "出现一条路径");
+            let wait = notice_wait(relay_since);
+            tokio::select! {
+                biased;
+                event = events.next() => {
+                    match event {
+                        Some(PathEvent::Opened { remote_addr, .. }) => {
+                            log_path(remote, role, &remote_addr, "出现一条路径");
+                        }
+                        Some(PathEvent::Selected { remote_addr, .. }) => {
+                            log_path(remote, role, &remote_addr, "数据改走这条路径");
+                            if remote_addr.is_relay() {
+                                relay_since = Some(Instant::now());
+                            } else {
+                                relay_since = None;
+                                routes.set(&key, false);
+                            }
+                        }
+                        Some(PathEvent::Closed { remote_addr, last_stats, .. }) => {
+                            tracing::info!(
+                                %remote,
+                                role,
+                                via = %remote_addr,
+                                kind = path_kind(&remote_addr),
+                                rtt_ms = last_stats.rtt.as_millis() as u64,
+                                sent_bytes = last_stats.udp_tx.bytes,
+                                recv_bytes = last_stats.udp_rx.bytes,
+                                cwnd = last_stats.cwnd,
+                                "路径关闭"
+                            );
+                        }
+                        Some(PathEvent::Lagged { missed, .. }) => {
+                            tracing::warn!(%remote, role, missed, "路径事件来不及记，漏掉了几条");
+                        }
+                        Some(_) => {}
+                        None => {
+                            routes.clear(&key);
+                            tracing::info!(%remote, role, "连接关闭");
+                            break;
+                        }
+                    }
                 }
-                Some(PathEvent::Selected { remote_addr, .. }) => {
-                    log_path(remote, role, &remote_addr, "数据改走这条路径");
-                }
-                Some(PathEvent::Closed {
-                    remote_addr,
-                    last_stats,
-                    ..
-                }) => {
-                    tracing::info!(
-                        %remote,
-                        role,
-                        via = %remote_addr,
-                        kind = path_kind(&remote_addr),
-                        rtt_ms = last_stats.rtt.as_millis() as u64,
-                        sent_bytes = last_stats.udp_tx.bytes,
-                        recv_bytes = last_stats.udp_rx.bytes,
-                        cwnd = last_stats.cwnd,
-                        "路径关闭"
-                    );
-                }
-                Some(PathEvent::Lagged { missed, .. }) => {
-                    tracing::warn!(%remote, role, missed, "路径事件来不及记，漏掉了几条");
-                }
-                Some(_) => {}
-                None => {
-                    tracing::info!(%remote, role, "连接关闭");
-                    break;
+                _ = wait => {
+                    if relay_since.is_some() {
+                        routes.set(&key, true);
+                        relay_since = None;
+                    }
                 }
             }
         }
     });
+}
+
+fn notice_wait(since: Option<Instant>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        match since {
+            Some(since) => {
+                let rest = RELAY_NOTICE_AFTER.saturating_sub(since.elapsed());
+                tokio::time::sleep(rest).await;
+            }
+            None => std::future::pending().await,
+        }
+    })
+}
+
+fn selected_is_relay(connection: &Connection) -> Option<bool> {
+    let paths = connection.paths();
+    let mut selected = None;
+    for path in &paths {
+        if path.is_selected() {
+            selected = Some(path.is_relay());
+        }
+    }
+    selected
 }
 
 fn log_path(remote: EndpointId, role: &str, addr: &TransportAddr, message: &str) {
@@ -345,6 +420,7 @@ mod tests {
         let site = StaticHost::bind(dir.join("site")).await.unwrap();
         host.set_host(HostTarget {
             router: site.router.clone(),
+            password: None,
         })
         .await;
 

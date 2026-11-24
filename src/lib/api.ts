@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { HostInfo, PlazaSnapshot, ScanReport, StageInfo, TrafficSnapshot } from "../types/ipc";
+import type { HostInfo, PlazaSnapshot, RouteStatus, ScanReport, StageInfo, TrafficSnapshot } from "../types/ipc";
 
 export function inDesktopApp(): boolean {
   return isTauri();
@@ -27,9 +27,17 @@ export function scanFolder(root: string): Promise<ScanReport> {
   return invoke("scan_folder", { root });
 }
 
-export function startHost(input: { mode: string; root?: string; port?: number; blurb?: string }): Promise<HostInfo> {
+export function startHost(input: {
+  mode: string;
+  root?: string;
+  port?: number;
+  blurb?: string;
+  password?: string;
+}): Promise<HostInfo> {
   assertDesktop();
-  const payload: { mode: string; root?: string; port?: number; blurb?: string } = { mode: input.mode };
+  const payload: { mode: string; root?: string; port?: number; blurb?: string; password?: string } = {
+    mode: input.mode,
+  };
   if (input.root) {
     payload.root = input.root;
   }
@@ -38,6 +46,9 @@ export function startHost(input: { mode: string; root?: string; port?: number; b
   }
   if (input.blurb) {
     payload.blurb = input.blurb;
+  }
+  if (input.password) {
+    payload.password = input.password;
   }
   return invoke("start_host", payload);
 }
@@ -62,14 +73,19 @@ export function traffic(): Promise<TrafficSnapshot> {
   return invoke("traffic");
 }
 
-export function openDiscovered(endpointId: string, title: string): Promise<StageInfo> {
+export function routeStatus(): Promise<RouteStatus> {
   assertDesktop();
-  return invoke("open_discovered", { endpointId, title });
+  return invoke("route_status");
 }
 
-export function openGuest(shareCode: string): Promise<StageInfo> {
+export function openDiscovered(endpointId: string, title: string, password?: string): Promise<StageInfo> {
   assertDesktop();
-  return invoke("open_guest", { shareCode });
+  return invoke("open_discovered", { endpointId, title, password: password ?? "" });
+}
+
+export function openGuest(shareCode: string, password?: string): Promise<StageInfo> {
+  assertDesktop();
+  return invoke("open_guest", { shareCode, password: password ?? "" });
 }
 
 export function openPreview(url: string, title: string): Promise<StageInfo> {
