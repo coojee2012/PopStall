@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+  :root {
+    color-scheme: light;
+    --ink: #241910;
+    --muted: #7b6d60;
+    --paper: #f3ecdf;
+    --card: #fffaf3;
+    --line: #e4d6c4;
+    --ember: #c45c26;
+    --pine: #2f6b4f;
+    --shadow: 0 18px 50px rgba(36, 25, 16, 0.08);
+    --serif: "Iowan Old Style", Palatino, "Songti SC", "Noto Serif SC", serif;
+    --sans: "Avenir Next", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  }
+  body[data-theme="video"] {
+    color-scheme: dark;
+    --ink: #f6efe4;
+    --muted: #b7a898;
+    --paper: #16130f;
+    --card: #221c16;
+    --line: #3a3128;
+    --shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background:
+      radial-gradient(900px 420px at 0% -10%, rgba(196, 92, 38, 0.16), transparent 55%),
+      radial-gradient(700px 380px at 100% 0%, rgba(47, 107, 79, 0.12), transparent 50%),
+      var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+  }
+  body[data-theme="video"] {
+    background:
+      radial-gradient(800px 360px at 20% -10%, rgba(196, 92, 38, 0.22), transparent 50%),
+      var(--paper);
+  }
+  header, main { width: min(1080px, calc(100% - 2.4rem)); margin: 0 auto; }
+  header { padding: 2.6rem 0 1.2rem; }
+  .mark {
+    margin: 0;
+    letter-spacing: 0.28em;
+    font-size: 0.72rem;
+    color: var(--ember);
+  }
+  h1 {
+    margin: 0.45rem 0 0;
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: clamp(2.4rem, 5vw, 4.4rem);
+    letter-spacing: -0.03em;
+  }
+  #lede { margin: 0.7rem 0 0; color: var(--muted); line-height: 1.7; }
+  main { padding-bottom: 4rem; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 0.9rem;
+  }
+  button.frame, .track, .chapter, .doc {
+    appearance: none;
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+  }
+  button.frame {
+    padding: 0;
+    border-radius: 1.1rem;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+  }
+  button.frame img { display: block; width: 100%; height: 220px; object-fit: cover; }
+  button.frame span, .track b, .chapter b, .doc b {
+    display: block;
+    padding: 0.75rem 0.85rem 0.9rem;
+    font-family: var(--serif);
+    font-weight: 500;
+  }
+  .player {
+    display: grid;
+    grid-template-columns: minmax(0, 280px) minmax(0, 1fr);
+    gap: 1.2rem;
+    align-items: center;
+  }
+  .disc {
+    width: min(280px, 70vw);
+    aspect-ratio: 1;
+    margin: 0 auto;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 50% 50%, var(--card) 0 18%, transparent 19% 22%, #1b140f 23% 100%);
+    box-shadow: var(--shadow);
+    display: grid;
+    place-items: center;
+    position: relative;
+  }
+  .disc::after {
+    content: "";
+    width: 18%;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: var(--ember);
+  }
+  .disc.spin { animation: spin 8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  audio, video { width: 100%; }
+  video {
+    background: #000;
+    border-radius: 1.1rem;
+    box-shadow: var(--shadow);
+    max-height: 68vh;
+  }
+  .list { display: flex; flex-direction: column; gap: 0.45rem; margin-top: 1rem; }
+  .track, .chapter, .doc { border-radius: 0.95rem; padding: 0.15rem 0.2rem; }
+  .track[aria-current="true"], .chapter[aria-current="true"], .doc[aria-current="true"] {
+    border-color: var(--ember);
+    background: color-mix(in srgb, var(--ember) 12%, var(--card));
+  }
+  .reader {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 1.4rem;
+  }
+  article {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 1.3rem;
+    padding: clamp(1.2rem, 3vw, 2.6rem);
+    box-shadow: var(--shadow);
+    font-family: var(--serif);
+    font-size: var(--read, 1.12rem);
+    line-height: 1.9;
+  }
+  article h2, article h3 { font-weight: 500; line-height: 1.3; }
+  article pre {
+    overflow: auto;
+    padding: 0.8rem 1rem;
+    border-radius: 0.8rem;
+    background: color-mix(in srgb, var(--ink) 6%, var(--card));
+    font-family: ui-monospace, monospace;
+    font-size: 0.86em;
+    line-height: 1.5;
+  }
+  .tools { display: flex; gap: 0.5rem; margin: 0.2rem 0 0.8rem; }
+  .tools button, #lightbox button {
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: inherit;
+    border-radius: 999px;
+    padding: 0.35rem 0.8rem;
+    font: inherit;
+    cursor: pointer;
+  }
+  iframe, embed { width: 100%; height: 78vh; border: 0; border-radius: 1.1rem; background: white; }
+  #lightbox[hidden] { display: none; }
+  #lightbox {
+    position: fixed;
+    inset: 0;
+    background: rgba(20, 14, 10, 0.88);
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    padding: 1rem;
+    color: #f6efe4;
+  }
+  #lightbox img { max-width: min(1100px, 100%); max-height: 74vh; margin: auto; object-fit: contain; }
+  #lightbox header { width: min(1100px, 100%); display: flex; justify-content: space-between; align-items: center; }
+  .nav { display: flex; justify-content: space-between; width: min(1100px, 100%); margin: 0 auto; }
+  .empty { color: var(--muted); padding: 2rem 0; }
+  @media (max-width: 800px) {
+    .player, .reader { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body data-theme="{{THEME}}">
+<header>
+  <p class="mark">闪摊</p>
+  <h1 id="title">{{TITLE}}</h1>
+  <p id="lede"></p>
+</header>
+<main id="stage"></main>
+<div id="lightbox" hidden>
+  <header>
+    <p id="light-title"></p>
+    <button id="light-close" type="button">关闭</button>
+  </header>
+  <img id="light-img" alt="">
+  <div class="nav">
+    <button id="light-prev" type="button">上一张</button>
+    <button id="light-next" type="button">下一张</button>
+  </div>
+</div>
+<script>
+const theme = document.body.dataset.theme;
+const stage = document.getElementById("stage");
+const lede = document.getElementById("lede");
+const copy = {
+  image: "只展出这个文件夹里的图片。",
+  music: "选一首再播放。不会自动出声。",
+  video: "宽幕播放。进度可以拖动。",
+  novel: "按章节阅读。字号和纸色记在这台浏览器里。",
+  document: "在这里翻开 PDF。"
+};
+lede.textContent = copy[theme] || "";
+
+function esc(value) {
+  return String(value).replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  })[ch]);
+}
+
+async function main() {
+  let catalog;
+  try {
+    const response = await fetch("/_stall/catalog.json");
+    if (!response.ok) throw new Error(String(response.status));
+    catalog = await response.json();
+  } catch (error) {
+    stage.innerHTML = '<p class="empty">目录没有打开。</p>';
+    return;
+  }
+  const items = catalog.items || [];
+  if (!items.length) {
+    stage.innerHTML = '<p class="empty">这个主题里还没有可以展示的文件。</p>';
+    return;
+  }
+  if (theme === "image") renderImages(items);
+  else if (theme === "music") renderMusic(items);
+  else if (theme === "video") renderVideo(items);
+  else if (theme === "novel") renderNovel(items);
+  else renderDocs(items);
+  if (catalog.truncated) {
+    const note = document.createElement("p");
+    note.className = "empty";
+    note.textContent = "文件太多，这次只铺开了前面的一部分。";
+    stage.append(note);
+  }
+}
+
+function renderImages(items) {
+  const grid = document.createElement("div");
+  grid.className = "grid";
+  items.forEach((item, index) => {
+    const button = document.createElement("button");
+    button.className = "frame";
+    button.type = "button";
+    button.innerHTML = '<img alt="" src="' + esc(item.path) + '"><span>' + esc(item.title) + "</span>";
+    button.addEventListener("click", () => openLight(items, index));
+    grid.append(button);
+  });
+  stage.append(grid);
+}
+
+let lightIndex = 0;
+let lightItems = [];
+function openLight(items, index) {
+  lightItems = items;
+  lightIndex = index;
+  paintLight();
+  document.getElementById("lightbox").hidden = false;
+}
+function paintLight() {
+  const item = lightItems[lightIndex];
+  document.getElementById("light-img").src = item.path;
+  document.getElementById("light-img").alt = item.title;
+  document.getElementById("light-title").textContent = item.title;
+}
+document.getElementById("light-close").onclick = () => { document.getElementById("lightbox").hidden = true; };
+document.getElementById("light-prev").onclick = () => { lightIndex = (lightIndex - 1 + lightItems.length) % lightItems.length; paintLight(); };
+document.getElementById("light-next").onclick = () => { lightIndex = (lightIndex + 1) % lightItems.length; paintLight(); };
+document.addEventListener("keydown", (event) => {
+  const box = document.getElementById("lightbox");
+  if (box.hidden) return;
+  if (event.key === "Escape") box.hidden = true;
+  if (event.key === "ArrowLeft") document.getElementById("light-prev").click();
+  if (event.key === "ArrowRight") document.getElementById("light-next").click();
+});
+
+function renderMusic(items) {
+  const wrap = document.createElement("div");
+  wrap.className = "player";
+  const disc = document.createElement("div");
+  disc.className = "disc";
+  const side = document.createElement("div");
+  const audio = document.createElement("audio");
+  audio.controls = true;
+  audio.preload = "none";
+  const now = document.createElement("p");
+  now.id = "now";
+  now.textContent = "还没有选择曲目";
+  const list = document.createElement("div");
+  list.className = "list";
+  items.forEach((item) => {
+    const button = document.createElement("button");
+    button.className = "track";
+    button.type = "button";
+    button.innerHTML = "<b>" + esc(item.title) + "</b>";
+    button.addEventListener("click", () => {
+      audio.src = item.path;
+      audio.play();
+      now.textContent = item.title;
+      list.querySelectorAll(".track").forEach((node) => node.removeAttribute("aria-current"));
+      button.setAttribute("aria-current", "true");
+    });
+    list.append(button);
+  });
+  audio.addEventListener("play", () => disc.classList.add("spin"));
+  audio.addEventListener("pause", () => disc.classList.remove("spin"));
+  audio.addEventListener("ended", () => disc.classList.remove("spin"));
+  side.append(now, audio, list);
+  wrap.append(disc, side);
+  stage.append(wrap);
+}
+
+function renderVideo(items) {
+  const video = document.createElement("video");
+  video.controls = true;
+  video.playsInline = true;
+  video.preload = "metadata";
+  video.src = items[0].path;
+  const list = document.createElement("div");
+  list.className = "list";
+  items.forEach((item, index) => {
+    const button = document.createElement("button");
+    button.className = "track";
+    button.type = "button";
+    if (index === 0) button.setAttribute("aria-current", "true");
+    button.innerHTML = "<b>" + esc(item.title) + "</b>";
+    button.addEventListener("click", () => {
+      video.src = item.path;
+      video.play();
+      list.querySelectorAll(".track").forEach((node) => node.removeAttribute("aria-current"));
+      button.setAttribute("aria-current", "true");
+    });
+    list.append(button);
+  });
+  stage.append(video, list);
+}
+
+function renderNovel(items) {
+  const saved = Number(localStorage.getItem("popstall-read-size") || "18");
+  document.documentElement.style.setProperty("--read", saved + "px");
+  if (localStorage.getItem("popstall-paper") === "night") document.body.dataset.theme = "video";
+  const tools = document.createElement("div");
+  tools.className = "tools";
+  tools.innerHTML = '<button type="button" id="smaller">小一点</button><button type="button" id="larger">大一点</button><button type="button" id="paper">换纸色</button>';
+  const wrap = document.createElement("div");
+  wrap.className = "reader";
+  const list = document.createElement("div");
+  list.className = "list";
+  const article = document.createElement("article");
+  article.textContent = "选一个章节。";
+  items.forEach((item, index) => {
+    const button = document.createElement("button");
+    button.className = "chapter";
+    button.type = "button";
+    button.innerHTML = "<b>" + esc(item.title) + "</b>";
+    button.addEventListener("click", () => openChapter(item, button, article, list));
+    list.append(button);
+    if (index === 0) button.click();
+  });
+  wrap.append(list, article);
+  stage.append(tools, wrap);
+  document.getElementById("smaller").onclick = () => resize(-1);
+  document.getElementById("larger").onclick = () => resize(1);
+  document.getElementById("paper").onclick = () => {
+    const night = document.body.dataset.theme !== "video";
+    document.body.dataset.theme = night ? "video" : "novel";
+    localStorage.setItem("popstall-paper", night ? "night" : "day");
+  };
+}
+
+function resize(delta) {
+  const current = Number(getComputedStyle(document.documentElement).getPropertyValue("--read").replace("px", "")) || 18;
+  const next = Math.min(28, Math.max(15, current + delta));
+  document.documentElement.style.setProperty("--read", next + "px");
+  localStorage.setItem("popstall-read-size", String(next));
+}
+
+async function openChapter(item, button, article, list) {
+  list.querySelectorAll(".chapter").forEach((node) => node.removeAttribute("aria-current"));
+  button.setAttribute("aria-current", "true");
+  article.textContent = "正在翻开…";
+  const response = await fetch(item.path);
+  const text = await response.text();
+  if (item.path.toLowerCase().endsWith(".txt")) {
+    article.textContent = text;
+    return;
+  }
+  article.innerHTML = markdown(text);
+}
+
+function markdown(raw) {
+  const lines = String(raw).replaceAll("\r\n", "\n").split("\n");
+  let html = "";
+  let list = false;
+  let code = false;
+  let buffer = "";
+  const flush = () => {
+    if (!buffer.trim()) { buffer = ""; return; }
+    html += "<p>" + inline(buffer.trim()) + "</p>";
+    buffer = "";
+  };
+  for (const line of lines) {
+    if (line.startsWith("```")) {
+      if (code) { html += "<pre><code>" + esc(buffer) + "</code></pre>"; buffer = ""; code = false; }
+      else { flush(); code = true; }
+      continue;
+    }
+    if (code) { buffer += (buffer ? "\n" : "") + line; continue; }
+    if (/^[-*] /.test(line)) {
+      flush();
+      if (!list) { html += "<ul>"; list = true; }
+      html += "<li>" + inline(line.slice(2)) + "</li>";
+      continue;
+    }
+    if (list) { html += "</ul>"; list = false; }
+    if (line.startsWith("### ")) { flush(); html += "<h3>" + inline(line.slice(4)) + "</h3>"; continue; }
+    if (line.startsWith("## ")) { flush(); html += "<h2>" + inline(line.slice(3)) + "</h2>"; continue; }
+    if (line.startsWith("# ")) { flush(); html += "<h2>" + inline(line.slice(2)) + "</h2>"; continue; }
+    if (!line.trim()) flush();
+    else buffer += (buffer ? " " : "") + line;
+  }
+  if (code) html += "<pre><code>" + esc(buffer) + "</code></pre>";
+  else flush();
+  if (list) html += "</ul>";
+  return html;
+}
+
+function inline(value) {
+  return esc(value)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\[([^\]]+)\]\((\/[^)\s]*)\)/g, '<a href="$2">$1</a>');
+}
+
+function renderDocs(items) {
+  const list = document.createElement("div");
+  list.className = "list";
+  const frame = document.createElement("iframe");
+  frame.title = items[0].title;
+  frame.src = items[0].path;
+  items.forEach((item, index) => {
+    const button = document.createElement("button");
+    button.className = "doc";
+    button.type = "button";
+    if (index === 0) button.setAttribute("aria-current", "true");
+    button.innerHTML = "<b>" + esc(item.title) + "</b>";
+    button.addEventListener("click", () => {
+      frame.src = item.path;
+      frame.title = item.title;
+      list.querySelectorAll(".doc").forEach((node) => node.removeAttribute("aria-current"));
+      button.setAttribute("aria-current", "true");
+    });
+    list.append(button);
+  });
+  stage.append(list, frame);
+}
+
+main();
+</script>
+</body>
+</html>

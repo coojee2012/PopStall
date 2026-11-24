@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "权限只授予主控台 webview main。摊位页的标签是 stage-*，不匹配这里，所以远程页面没有 Tauri IPC。窗口级授权会把权限带给同一窗口里的所有 webview，因此这里只写 webviews。",
+  "webviews": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "dialog:default"
+  ]
+}

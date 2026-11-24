@@ -1,0 +1,31 @@
+:root {
+  color: #241910;
+  background: #f4eee4;
+  font-family: "Iowan Old Style", "Palatino Linotype", "Songti SC", serif;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 38rem;
+  margin: 0 auto;
+  padding: 4.5rem 1.5rem;
+}
+
+.eyebrow {
+  letter-spacing: 0.18em;
+  font-family: "Avenir Next", "PingFang SC", sans-serif;
+  font-size: 0.75rem;
+}
+
+h1 {
+  font-size: 2.6rem;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+a {
+  color: #c45c26;
+}
