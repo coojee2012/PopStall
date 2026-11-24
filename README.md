@@ -13,15 +13,13 @@ npm install
 npm run tauri dev
 ```
 
-打包后不需要安装 Node 或 Rust，也不走安装向导：
+打包后的程序不需要再装 Node 或 Rust：
 
-- macOS：双击 `src-tauri/target/release/bundle/macos/PopStall.app`
-- Linux：运行对应的 `.AppImage`
-- Windows：运行打包目录里的 `PopStall.exe`。Windows 11 已带 WebView2；更早的系统第一次打开时会补这个系统组件
+- macOS：`npm run package`，然后双击 `src-tauri/target/release/bundle/macos/PopStall.app`
+- Linux：`npm run package`，运行打出来的 `.AppImage`
+- Windows 11：在项目根目录执行 `powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1`。安装包在 `src-tauri\target\release\bundle\nsis\`，免安装的程序是 `src-tauri\target\release\popstall.exe`。Windows 11 已带 WebView2
 
-```bash
-npm run package
-```
+本项目以 Apache License 2.0 授权，见仓库根目录的 `LICENSE`。
 
 发布端选择 `examples/hello-stall`，开张后复制分享码。访问端再开一个客户端，粘贴分享码。同一台电脑也可以开两个进程互相访问。
 
