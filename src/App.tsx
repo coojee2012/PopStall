@@ -3,6 +3,7 @@ import { DirectoryPanel } from "./components/directory/DirectoryPanel";
 import { GuestPanel } from "./components/studio/GuestPanel";
 import { HostPanel } from "./components/studio/HostPanel";
 import { StageView } from "./components/studio/StageView";
+import { TrafficMeter } from "./components/studio/TrafficMeter";
 import { useSession } from "./stores/session";
 
 export default function App() {
@@ -50,6 +51,7 @@ export default function App() {
       <footer className="mt-8 max-w-3xl text-xs leading-5 text-muted">
         广场上的摊可以直接进去。分享码则是点名找某一个摊。别人的页面和本机预览都开在闪摊这一页里，没有系统权限。
       </footer>
+      {stage ? null : <TrafficMeter floating />}
       {stage ? <StageView /> : null}
     </main>
   );

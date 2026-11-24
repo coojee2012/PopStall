@@ -43,6 +43,7 @@ pub fn run() {
             commands::open_preview,
             commands::open_guest,
             commands::list_plaza,
+            commands::traffic,
             commands::open_discovered,
             commands::place_stage_bounds,
             commands::close_stage

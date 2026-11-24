@@ -113,6 +113,7 @@
   }
   .disc.spin { animation: spin 8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  #now { margin: 0 0 0.85rem; color: var(--muted); min-height: 1.4em; }
   audio, video { width: 100%; }
   video {
     background: #000;
@@ -285,6 +286,7 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "ArrowRight") document.getElementById("light-next").click();
 });
 
+let musicToken = 0;
 function renderMusic(items) {
   const wrap = document.createElement("div");
   wrap.className = "player";
@@ -293,7 +295,7 @@ function renderMusic(items) {
   const side = document.createElement("div");
   const audio = document.createElement("audio");
   audio.controls = true;
-  audio.preload = "none";
+  audio.preload = "auto";
   const now = document.createElement("p");
   now.id = "now";
   now.textContent = "还没有选择曲目";
@@ -305,11 +307,9 @@ function renderMusic(items) {
     button.type = "button";
     button.innerHTML = "<b>" + esc(item.title) + "</b>";
     button.addEventListener("click", () => {
-      audio.src = item.path;
-      audio.play();
-      now.textContent = item.title;
       list.querySelectorAll(".track").forEach((node) => node.removeAttribute("aria-current"));
       button.setAttribute("aria-current", "true");
+      startTrack(audio, item, now);
     });
     list.append(button);
   });
@@ -321,29 +321,202 @@ function renderMusic(items) {
   stage.append(wrap);
 }
 
+function audioType(path) {
+  const ext = (path.split(".").pop() || "").toLowerCase().split("?")[0];
+  if (ext === "mp3") return "audio/mpeg";
+  if (ext === "m4a" || ext === "aac" || ext === "mp4") return "audio/mp4";
+  if (ext === "webm") return "audio/webm";
+  if (ext === "ogg") return "audio/ogg";
+  return "";
+}
+
+function startTrack(audio, item, now) {
+  const token = ++musicToken;
+  audio.pause();
+  if (audio._reader) audio._reader.cancel().catch(() => {});
+  if (audio._revoke) audio._revoke();
+  audio._reader = null;
+  audio._revoke = null;
+  now.textContent = "正在缓冲 " + item.title;
+  const type = audioType(item.path);
+  if (type && window.MediaSource && MediaSource.isTypeSupported(type)) {
+    const media = new MediaSource();
+    const url = URL.createObjectURL(media);
+    audio._revoke = () => URL.revokeObjectURL(url);
+    audio.src = url;
+    audio.play().catch(() => {});
+    media.addEventListener("sourceopen", () => {
+      streamTrack(media, audio, item, type, token, now);
+    }, { once: true });
+    return;
+  }
+  bufferTrack(audio, item, token, now);
+}
+
+async function streamTrack(media, audio, item, type, token, now) {
+  let source;
+  try {
+    source = media.addSourceBuffer(type);
+    source.mode = "sequence";
+  } catch (error) {
+    bufferTrack(audio, item, token, now);
+    return;
+  }
+  let response;
+  try {
+    response = await fetch(item.path);
+  } catch (error) {
+    if (token === musicToken) now.textContent = "这首没能读出来";
+    return;
+  }
+  if (!response.ok || !response.body) {
+    if (token === musicToken) now.textContent = "这首没能读出来";
+    return;
+  }
+  const total = Number(response.headers.get("content-length")) || 0;
+  const reader = response.body.getReader();
+  audio._reader = reader;
+  const pending = [];
+  let writing = false;
+  let received = 0;
+  let started = false;
+  const writeNext = () => {
+    if (writing || !pending.length || source.updating || token !== musicToken) return;
+    writing = true;
+    const chunk = pending.shift();
+    const onDone = () => {
+      writing = false;
+      writeNext();
+    };
+    source.addEventListener("updateend", onDone, { once: true });
+    source.addEventListener("error", onDone, { once: true });
+    try {
+      source.appendBuffer(chunk);
+    } catch (error) {
+      source.removeEventListener("updateend", onDone);
+      writing = false;
+    }
+  };
+  while (token === musicToken) {
+    let step;
+    try {
+      step = await reader.read();
+    } catch (error) {
+      break;
+    }
+    if (step.done) {
+      const finish = () => {
+        if (media.readyState === "open") {
+          try { media.endOfStream(); } catch (error) {}
+        }
+      };
+      if (source.updating) source.addEventListener("updateend", finish, { once: true });
+      else finish();
+      if (token === musicToken) now.textContent = item.title;
+      break;
+    }
+    const bytes = step.value;
+    received += bytes.byteLength;
+    pending.push(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    writeNext();
+    if (!started && (received >= 256 * 1024 || (total > 0 && received >= total))) {
+      started = true;
+      if (token === musicToken) {
+        now.textContent = item.title;
+        audio.play().catch(() => {});
+      }
+    } else if (!started && total > 0 && token === musicToken) {
+      now.textContent = "正在缓冲 " + Math.min(99, Math.round(received / total * 100)) + "%";
+    }
+  }
+}
+
+async function bufferTrack(audio, item, token, now) {
+  let response;
+  try {
+    response = await fetch(item.path);
+  } catch (error) {
+    if (token === musicToken) now.textContent = "这首没能读出来";
+    return;
+  }
+  if (!response.ok || !response.body) {
+    if (token === musicToken) now.textContent = "这首没能读出来";
+    return;
+  }
+  const total = Number(response.headers.get("content-length")) || 0;
+  const reader = response.body.getReader();
+  audio._reader = reader;
+  const chunks = [];
+  let received = 0;
+  while (token === musicToken) {
+    let step;
+    try {
+      step = await reader.read();
+    } catch (error) {
+      return;
+    }
+    if (step.done) break;
+    chunks.push(step.value);
+    received += step.value.byteLength;
+    if (total > 0) now.textContent = "正在缓冲 " + Math.min(99, Math.round(received / total * 100)) + "%";
+  }
+  if (token !== musicToken) return;
+  const blob = new Blob(chunks, { type: response.headers.get("content-type") || "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  audio._revoke = () => URL.revokeObjectURL(url);
+  audio.src = url;
+  now.textContent = item.title;
+  audio.play().catch(() => {
+    now.textContent = item.title + " · 按播放键开始";
+  });
+}
+
 function renderVideo(items) {
+  const now = document.createElement("p");
+  now.id = "now";
   const video = document.createElement("video");
   video.controls = true;
   video.playsInline = true;
-  video.preload = "metadata";
-  video.src = items[0].path;
+  video.preload = "auto";
   const list = document.createElement("div");
   list.className = "list";
+  const label = () => now.dataset.title || "";
+  video.addEventListener("waiting", () => {
+    now.textContent = "正在缓冲 " + label();
+  });
+  video.addEventListener("playing", () => {
+    now.textContent = label();
+  });
+  video.addEventListener("progress", () => {
+    if (video.readyState >= 3 || !video.buffered.length) return;
+    const duration = video.duration;
+    if (!isFinite(duration) || duration <= 0) return;
+    const end = video.buffered.end(video.buffered.length - 1);
+    now.textContent = "正在缓冲 " + Math.min(99, Math.round(end / duration * 100)) + "%";
+  });
   items.forEach((item, index) => {
     const button = document.createElement("button");
     button.className = "track";
     button.type = "button";
-    if (index === 0) button.setAttribute("aria-current", "true");
     button.innerHTML = "<b>" + esc(item.title) + "</b>";
     button.addEventListener("click", () => {
-      video.src = item.path;
-      video.play();
       list.querySelectorAll(".track").forEach((node) => node.removeAttribute("aria-current"));
       button.setAttribute("aria-current", "true");
+      now.dataset.title = item.title;
+      now.textContent = "正在缓冲 " + item.title;
+      video.src = item.path;
+      const play = video.play();
+      if (play && play.catch) play.catch(() => {});
     });
     list.append(button);
+    if (index === 0) {
+      button.setAttribute("aria-current", "true");
+      now.dataset.title = item.title;
+      now.textContent = item.title;
+      video.src = item.path;
+    }
   });
-  stage.append(video, list);
+  stage.append(now, video, list);
 }
 
 function renderNovel(items) {

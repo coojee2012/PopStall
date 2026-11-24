@@ -13,6 +13,7 @@ export function DirectoryPanel() {
   const busy = useSession((state) => state.guestBusy);
   const openDiscovered = useSession((state) => state.openDiscovered);
   const [stalls, setStalls] = useState<PlazaStall[]>([]);
+  const [query, setQuery] = useState("");
   const [neighbors, setNeighbors] = useState(0);
   const [ready, setReady] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -49,6 +50,15 @@ export function DirectoryPanel() {
     };
   }, [desktop]);
 
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const visible = stalls.filter((stall) => {
+    if (terms.length === 0) {
+      return true;
+    }
+    const haystack = `${stall.title}\n${stall.label}\n${stall.blurb ?? ""}`.toLowerCase();
+    return terms.every((term) => haystack.includes(term));
+  });
+
   const status = !desktop
     ? "在桌面窗口里才会开始找人"
     : !ready
@@ -69,16 +79,24 @@ export function DirectoryPanel() {
       <p className="mt-3 max-w-3xl text-sm leading-6 text-muted">
         开着闪摊，就会进入同一张广场。别人开张之后出现在这里，点进去就是对方的页面。摊位内容仍然直接从对方电脑过来。
       </p>
+      <input
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        placeholder="搜索摊主写的词"
+        className="mt-4 w-full rounded-full border border-line bg-paper px-4 py-2 text-sm outline-none focus:border-ember"
+      />
       {problem ? <p className="mt-4 text-sm leading-6 text-ember-dark">{problem}</p> : null}
-      {stalls.length === 0 ? (
+      {visible.length === 0 ? (
         <p className="mt-5 rounded-[1.3rem] bg-paper px-4 py-4 text-sm leading-6 text-muted">
-          {desktop
-            ? "还没有看见别人的摊。两边都开着闪摊，局域网通常很快，跨网要等中继和广场入口接上。"
-            : "用闪摊桌面窗口打开后，这里会列出别人正在营业的摊。"}
+          {stalls.length > 0
+            ? "没有摊位带这些词。"
+            : desktop
+              ? "还没有看见别人的摊。两边都开着闪摊，局域网通常很快，跨网要等中继和广场入口接上。"
+              : "用闪摊桌面窗口打开后，这里会列出别人正在营业的摊。"}
         </p>
       ) : (
         <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {stalls.map((stall) => (
+          {visible.map((stall) => (
             <button
               key={stall.endpointId}
               type="button"
@@ -89,6 +107,7 @@ export function DirectoryPanel() {
               <Store className="mt-1 size-4 shrink-0 text-ember" />
               <span>
                 <span className="block font-serif text-xl">{stall.title}</span>
+                {stall.blurb ? <span className="mt-1 block text-sm leading-6 text-ink">{stall.blurb}</span> : null}
                 <span className="mt-1 block text-xs text-muted">{stall.label || "摊位"}</span>
               </span>
             </button>

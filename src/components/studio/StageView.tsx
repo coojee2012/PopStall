@@ -2,6 +2,7 @@ import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { placeStage } from "../../lib/api";
 import { useSession } from "../../stores/session";
+import { TrafficMeter } from "./TrafficMeter";
 
 export function StageView() {
   const stage = useSession((state) => state.stage);
@@ -62,7 +63,10 @@ export function StageView() {
           <p className="text-[0.68rem] tracking-[0.28em] text-ember">闪摊</p>
           <p className="truncate font-serif text-lg leading-tight">{stage.title}</p>
         </div>
-        <p className="ml-auto text-xs tracking-wide text-muted">{stage.kind === "guest" ? "串门" : "本机预览"}</p>
+        <div className="ml-auto flex items-center gap-3">
+          <TrafficMeter />
+          <p className="text-xs tracking-wide text-muted">{stage.kind === "guest" ? "串门" : "本机预览"}</p>
+        </div>
       </header>
       <div ref={slot} className="min-h-0 flex-1 bg-paper" />
     </div>

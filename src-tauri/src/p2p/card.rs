@@ -2,11 +2,13 @@ use iroh::{PublicKey, SecretKey, Signature};
 
 pub const CARD_TTL_SECS: u32 = 90;
 const MAGIC: &[u8; 4] = b"PSC1";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const KIND_OPEN: u8 = 1;
 const KIND_BYE: u8 = 2;
 const MAX_TITLE: usize = 48;
 const MAX_LABEL: usize = 32;
+pub const MAX_BLURB_CHARS: usize = 100;
+const MAX_BLURB_BYTES: usize = MAX_BLURB_CHARS * 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Card {
@@ -14,6 +16,7 @@ pub enum Card {
         endpoint_id: PublicKey,
         title: String,
         label: String,
+        blurb: String,
         timestamp: u64,
         ttl: u32,
     },
@@ -22,18 +25,19 @@ pub enum Card {
     },
 }
 
-pub fn encode_open(secret: &SecretKey, title: &str, label: &str) -> Vec<u8> {
+pub fn encode_open(secret: &SecretKey, title: &str, label: &str, blurb: &str) -> Vec<u8> {
     encode(
         secret,
         KIND_OPEN,
         &clip(title, MAX_TITLE),
         &clip(label, MAX_LABEL),
+        &clip_chars(blurb, MAX_BLURB_CHARS),
         CARD_TTL_SECS,
     )
 }
 
 pub fn encode_bye(secret: &SecretKey) -> Vec<u8> {
-    encode(secret, KIND_BYE, "", "", CARD_TTL_SECS)
+    encode(secret, KIND_BYE, "", "", "", CARD_TTL_SECS)
 }
 
 pub fn decode(bytes: &[u8], now: u64) -> Option<Card> {
@@ -44,7 +48,7 @@ pub fn decode(bytes: &[u8], now: u64) -> Option<Card> {
     let signed = &bytes[..signed_len];
     let mut cursor = &bytes[4..signed_len];
     let version = take_u8(&mut cursor)?;
-    if version != VERSION {
+    if version != 1 && version != VERSION {
         return None;
     }
     let kind = take_u8(&mut cursor)?;
@@ -54,6 +58,11 @@ pub fn decode(bytes: &[u8], now: u64) -> Option<Card> {
     let ttl = u32::from_be_bytes(take_array::<4>(&mut cursor)?);
     let title = take_str(&mut cursor, MAX_TITLE)?;
     let label = take_str(&mut cursor, MAX_LABEL)?;
+    let blurb = if version >= 2 {
+        take_text(&mut cursor, MAX_BLURB_BYTES)?
+    } else {
+        String::new()
+    };
     if !cursor.is_empty() {
         return None;
     }
@@ -74,12 +83,21 @@ pub fn decode(bytes: &[u8], now: u64) -> Option<Card> {
                 title
             },
             label,
+            blurb,
             timestamp,
             ttl,
         }),
         KIND_BYE => Some(Card::Bye { endpoint_id }),
         _ => None,
     }
+}
+
+pub fn clip_chars(text: &str, max_chars: usize) -> String {
+    let cleaned: String = text
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    cleaned.trim().chars().take(max_chars).collect()
 }
 
 pub fn clip(text: &str, max: usize) -> String {
@@ -95,8 +113,8 @@ pub fn clip(text: &str, max: usize) -> String {
     trimmed[..end].to_string()
 }
 
-fn encode(secret: &SecretKey, kind: u8, title: &str, label: &str, ttl: u32) -> Vec<u8> {
-    let mut body = Vec::with_capacity(128);
+fn encode(secret: &SecretKey, kind: u8, title: &str, label: &str, blurb: &str, ttl: u32) -> Vec<u8> {
+    let mut body = Vec::with_capacity(256);
     body.extend_from_slice(MAGIC);
     body.push(VERSION);
     body.push(kind);
@@ -105,6 +123,7 @@ fn encode(secret: &SecretKey, kind: u8, title: &str, label: &str, ttl: u32) -> V
     body.extend_from_slice(&ttl.to_be_bytes());
     push_str(&mut body, title);
     push_str(&mut body, label);
+    push_text(&mut body, blurb);
     let signature = secret.sign(&body);
     body.extend_from_slice(&signature.to_bytes());
     body
@@ -114,6 +133,13 @@ fn push_str(body: &mut Vec<u8>, text: &str) {
     let text = clip(text, 255);
     body.push(text.len() as u8);
     body.extend_from_slice(text.as_bytes());
+}
+
+fn push_text(body: &mut Vec<u8>, text: &str) {
+    let bytes = text.as_bytes();
+    let len = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
+    body.extend_from_slice(&len.to_be_bytes());
+    body.extend_from_slice(&bytes[..usize::from(len)]);
 }
 
 fn take_u8(input: &mut &[u8]) -> Option<u8> {
@@ -134,6 +160,15 @@ fn take_array<const N: usize>(input: &mut &[u8]) -> Option<[u8; N]> {
 
 fn take_str(input: &mut &[u8], max: usize) -> Option<String> {
     let len = take_u8(input)? as usize;
+    take_bytes(input, len, max)
+}
+
+fn take_text(input: &mut &[u8], max: usize) -> Option<String> {
+    let len = u16::from_be_bytes(take_array(input)?) as usize;
+    take_bytes(input, len, max)
+}
+
+fn take_bytes(input: &mut &[u8], len: usize, max: usize) -> Option<String> {
     if len > max || input.len() < len {
         return None;
     }
@@ -156,12 +191,21 @@ mod tests {
     #[test]
     fn open_card_round_trips_and_rejects_tampering() {
         let secret = iroh::SecretKey::generate();
-        let bytes = encode_open(&secret, "海边的图片\n", "图片展厅");
+        let blurb = "夜里的爵士 ".repeat(20);
+        let bytes = encode_open(&secret, "海边的图片\n", "图片展厅", &blurb);
         let card = decode(&bytes, unix_now()).expect("card");
         match card {
-            super::Card::Open { title, label, endpoint_id, .. } => {
+            super::Card::Open {
+                title,
+                label,
+                blurb,
+                endpoint_id,
+                ..
+            } => {
                 assert_eq!(title, "海边的图片");
                 assert_eq!(label, "图片展厅");
+                assert_eq!(blurb.chars().count(), super::MAX_BLURB_CHARS);
+                assert!(blurb.starts_with("夜里的爵士"));
                 assert_eq!(endpoint_id, secret.public());
             }
             super::Card::Bye { .. } => panic!("expected an open card"),

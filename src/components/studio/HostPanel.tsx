@@ -21,6 +21,8 @@ export function HostPanel() {
   const scanning = useSession((state) => state.scanning);
   const choice = useSession((state) => state.choice);
   const port = useSession((state) => state.port);
+  const blurb = useSession((state) => state.blurb);
+  const setBlurb = useSession((state) => state.setBlurb);
   const host = useSession((state) => state.host);
   const busy = useSession((state) => state.hostBusy);
   const chooseFolder = useSession((state) => state.chooseFolder);
@@ -152,6 +154,21 @@ export function HostPanel() {
                 WebSocket 的热更新还不行。
               </p>
           </div>
+
+          <label className="block">
+            <span className="flex items-baseline justify-between gap-3 text-sm">
+              <span>给广场的一句话</span>
+              <span className="font-mono text-xs text-muted">{Array.from(blurb).length}/100</span>
+            </span>
+            <textarea
+              value={blurb}
+              maxLength={100}
+              rows={3}
+              placeholder="100 字以内。别人可以按这里的词搜索，比如：爵士、夜里、民谣"
+              onChange={(event) => setBlurb(event.target.value)}
+              className="mt-2 w-full resize-none rounded-[1.1rem] border border-line bg-paper px-4 py-3 text-sm leading-6 outline-none focus:border-ember"
+            />
+          </label>
 
           <div className="flex flex-wrap items-center justify-between gap-3">
             <StatusDot tone={busy || scanning ? "busy" : "idle"} label={busy ? "正在准备节点" : scanning ? "正在看文件夹" : "还没有开张"} />

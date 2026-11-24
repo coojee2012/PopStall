@@ -11,8 +11,9 @@ use tower::ServiceExt;
 
 use super::frame::{ResponseHead, decode_request, encode_response_head};
 use super::io::read_limited;
+use super::traffic::Traffic;
 use crate::security::{
-    BANDWIDTH_BYTES_PER_SEC, BandwidthLimit, MAX_REQUEST_BODY, MAX_RESPONSE_BYTES,
+    BANDWIDTH_BYTES_PER_SEC, BandwidthLimit, MAX_MEDIA_BYTES, MAX_REQUEST_BODY, MAX_RESPONSE_BYTES,
     MAX_STREAMS_PER_VISITOR, MAX_TARGET_LEN, MAX_VISITORS,
 };
 
@@ -26,14 +27,16 @@ pub struct StallHandler {
     visitors: Arc<Semaphore>,
     bandwidth: Arc<BandwidthLimit>,
     target: Arc<RwLock<Option<HostTarget>>>,
+    traffic: Arc<Traffic>,
 }
 
 impl StallHandler {
-    pub fn new() -> Self {
+    pub fn new(traffic: Arc<Traffic>) -> Self {
         Self {
             visitors: Arc::new(Semaphore::new(MAX_VISITORS)),
             bandwidth: Arc::new(BandwidthLimit::new(BANDWIDTH_BYTES_PER_SEC)),
             target: Arc::new(RwLock::new(None)),
+            traffic,
         }
     }
 
@@ -74,12 +77,13 @@ impl ProtocolHandler for StallHandler {
             let target = self.target.clone();
             let stream_slots = stream_slots.clone();
             let bandwidth = self.bandwidth.clone();
+            let traffic = self.traffic.clone();
             tokio::spawn(async move {
                 if stream_slots.try_acquire_owned().is_err() {
                     let _ = write_text(send, 503, "这个摊位的并发请求已满").await;
                     return;
                 }
-                if let Err(err) = handle_stream(target, bandwidth, send, recv).await {
+                if let Err(err) = handle_stream(target, bandwidth, traffic, send, recv).await {
                     tracing::warn!(%err, "stall stream failed");
                 }
             });
@@ -91,10 +95,12 @@ impl ProtocolHandler for StallHandler {
 async fn handle_stream(
     target: Arc<RwLock<Option<HostTarget>>>,
     bandwidth: Arc<BandwidthLimit>,
+    traffic: Arc<Traffic>,
     mut send: SendStream,
     mut recv: RecvStream,
 ) -> anyhow::Result<()> {
     let bytes = read_limited(&mut recv, 16 + MAX_TARGET_LEN + MAX_REQUEST_BODY).await?;
+    traffic.record_received(bytes.len() as u64);
     let request = match decode_request(&bytes) {
         Ok(request) => request,
         Err(err) => return write_text(send, 400, &err.to_string()).await,
@@ -131,7 +137,12 @@ async fn handle_stream(
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
-    if content_length.is_some_and(|length| length > MAX_RESPONSE_BYTES) {
+    let ceiling = if is_media_type(&content_type) {
+        MAX_MEDIA_BYTES
+    } else {
+        MAX_RESPONSE_BYTES
+    };
+    if content_length.is_some_and(|length| length > ceiling) {
         return write_text(send, 413, "响应超过单文件上限").await;
     }
     let content_range = headers
@@ -150,6 +161,7 @@ async fn handle_stream(
         accept_ranges,
     })?;
     send.write_all(&head).await?;
+    traffic.record_sent(head.len() as u64);
 
     let mut body = response.into_body();
     let mut sent = 0u64;
@@ -159,15 +171,21 @@ async fn handle_stream(
             continue;
         };
         sent += data.len() as u64;
-        if sent > MAX_RESPONSE_BYTES {
+        if sent > ceiling {
             anyhow::bail!("响应超过单文件上限");
         }
         bandwidth.consume(data.len() as u64).await;
         send.write_all(&data).await?;
+        traffic.record_sent(data.len() as u64);
     }
     send.finish()
         .map_err(|err| anyhow::anyhow!("关闭响应流失败: {err:?}"))?;
     Ok(())
+}
+
+fn is_media_type(content_type: &str) -> bool {
+    let mime = content_type.split(';').next().unwrap_or(content_type).trim();
+    mime.starts_with("audio/") || mime.starts_with("video/")
 }
 
 async fn write_text(mut send: SendStream, status: u16, message: &str) -> anyhow::Result<()> {

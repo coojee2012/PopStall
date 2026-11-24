@@ -24,13 +24,18 @@ const MAX_STALLS: usize = 200;
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Announce {
     Idle,
-    Open { title: String, label: String },
+    Open {
+        title: String,
+        label: String,
+        blurb: String,
+    },
 }
 
 #[derive(Clone, Debug)]
 struct LiveStall {
     title: String,
     label: String,
+    blurb: String,
     timestamp: u64,
     expires: Instant,
 }
@@ -41,6 +46,7 @@ pub struct PlazaStall {
     pub endpoint_id: String,
     pub title: String,
     pub label: String,
+    pub blurb: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -66,10 +72,11 @@ pub struct Plaza {
 }
 
 impl Plaza {
-    pub fn announce(&self, title: &str, label: &str) {
+    pub fn announce(&self, title: &str, label: &str, blurb: &str) {
         let _ = self.announce.send(Announce::Open {
             title: card::clip(title, 48),
             label: card::clip(label, 32),
+            blurb: card::clip_chars(blurb, card::MAX_BLURB_CHARS),
         });
     }
 
@@ -88,6 +95,7 @@ impl Plaza {
                 endpoint_id: id.to_string(),
                 title: stall.title.clone(),
                 label: stall.label.clone(),
+                blurb: stall.blurb.clone(),
             })
             .collect();
         listed.sort_by(|left, right| left.title.cmp(&right.title).then(left.endpoint_id.cmp(&right.endpoint_id)));
@@ -304,9 +312,9 @@ async fn publish_current(
     published: &mut bool,
 ) {
     let bytes = match &announce {
-        Announce::Open { title, label } => {
+        Announce::Open { title, label, blurb } => {
             *published = true;
-            card::encode_open(secret, title, label)
+            card::encode_open(secret, title, label, blurb)
         }
         Announce::Idle if *published => {
             *published = false;
@@ -340,6 +348,7 @@ async fn ingest(
         Card::Open {
             title,
             label,
+            blurb,
             timestamp,
             ttl,
             ..
@@ -355,6 +364,7 @@ async fn ingest(
                 LiveStall {
                     title: title.clone(),
                     label,
+                    blurb,
                     timestamp,
                     expires: Instant::now() + Duration::from_secs(u64::from(ttl.clamp(30, 180))),
                 },

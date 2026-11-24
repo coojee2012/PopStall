@@ -4,7 +4,9 @@ mod limit;
 mod path;
 mod ssrf;
 
-pub use limit::{BANDWIDTH_BYTES_PER_SEC, BandwidthLimit, MAX_REQUEST_BODY, MAX_RESPONSE_BYTES};
+pub use limit::{
+    BANDWIDTH_BYTES_PER_SEC, BandwidthLimit, MAX_MEDIA_BYTES, MAX_REQUEST_BODY, MAX_RESPONSE_BYTES,
+};
 pub use path::{ResolvedPath, SafePathError, resolve_within_root, validate_target};
 pub use ssrf::{is_restricted_host, navigation_allowed};
 

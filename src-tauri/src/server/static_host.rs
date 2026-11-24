@@ -18,7 +18,9 @@ use tower_http::trace::TraceLayer;
 use super::catalog::{MediaFile, Theme, files_for_theme, scan_folder};
 use super::exhibit::render_exhibit;
 use super::forward;
-use crate::security::{MAX_RESPONSE_BYTES, ResolvedPath, SafePathError, resolve_within_root, validate_target};
+use crate::security::{
+    MAX_MEDIA_BYTES, MAX_RESPONSE_BYTES, ResolvedPath, SafePathError, resolve_within_root, validate_target,
+};
 
 const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b' ')
@@ -261,8 +263,10 @@ async fn serve_file(method: &Method, path: PathBuf, range_header: Option<&str>) 
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
     let content_type = content_type_for(&path);
+    let media = content_type.starts_with("audio/") || content_type.starts_with("video/");
+    let ceiling = if media { MAX_MEDIA_BYTES } else { MAX_RESPONSE_BYTES };
     let (status, start, end) = if let Some(header) = range_header {
-        match parse_byte_range(header, total) {
+        match parse_byte_range(header, total, ceiling) {
             Some((start, end)) => (StatusCode::PARTIAL_CONTENT, start, end),
             None => {
                 return Response::builder()
@@ -273,12 +277,17 @@ async fn serve_file(method: &Method, path: PathBuf, range_header: Option<&str>) 
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
             }
         }
-    } else if total > MAX_RESPONSE_BYTES {
+    } else if total > ceiling {
+        let message = if media {
+            "这个影音超过 32 GB。"
+        } else {
+            "这个文件太大，需要分段读取。"
+        };
         return Response::builder()
             .status(StatusCode::PAYLOAD_TOO_LARGE)
             .header(header::ACCEPT_RANGES, "bytes")
             .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-            .body(Body::from("这个文件太大，需要分段读取。"))
+            .body(Body::from(message))
             .unwrap_or_else(|_| StatusCode::PAYLOAD_TOO_LARGE.into_response());
     } else {
         (StatusCode::OK, 0, total.saturating_sub(1))
@@ -322,7 +331,7 @@ async fn serve_file(method: &Method, path: PathBuf, range_header: Option<&str>) 
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-fn parse_byte_range(header: &str, total: u64) -> Option<(u64, u64)> {
+fn parse_byte_range(header: &str, total: u64, ceiling: u64) -> Option<(u64, u64)> {
     if total == 0 {
         return None;
     }
@@ -354,8 +363,8 @@ fn parse_byte_range(header: &str, total: u64) -> Option<(u64, u64)> {
         }
         (start, end)
     };
-    if end - start + 1 > MAX_RESPONSE_BYTES {
-        end = start + MAX_RESPONSE_BYTES - 1;
+    if end - start + 1 > ceiling {
+        end = start + ceiling - 1;
     }
     Some((start, end))
 }

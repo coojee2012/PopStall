@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
@@ -13,10 +14,11 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use crate::p2p::{RequestFrame, encode_request, read_response_head};
+use crate::p2p::{RequestFrame, Traffic, encode_request, read_response_head};
 use crate::security::{MAX_REQUEST_BODY, is_restricted_host, validate_target};
 
-const PROXY_CSP: &str = "default-src 'self' data: blob:; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob:; media-src 'self' blob: data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; connect-src 'self'; frame-src 'self'; worker-src 'self' blob:";
+use super::PROXY_CSP;
+use super::media::{MediaHub, is_media_target};
 
 pub struct GuestProxy {
     pub port: u16,
@@ -24,12 +26,18 @@ pub struct GuestProxy {
 }
 
 impl GuestProxy {
-    pub async fn start(connection: Connection) -> anyhow::Result<Self> {
+    pub async fn start(connection: Connection, traffic: Arc<Traffic>) -> anyhow::Result<Self> {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
         let port = listener.local_addr()?.port();
+        let media = MediaHub::new(connection.clone(), traffic.clone());
         let app = Router::new()
             .fallback(forward)
-            .with_state(ProxyState { connection, port });
+            .with_state(ProxyState {
+                connection,
+                port,
+                traffic,
+                media,
+            });
         let (shutdown, mut stop) = watch::channel(false);
         tokio::spawn(async move {
             let result = axum::serve(listener, app)
@@ -67,6 +75,8 @@ impl Drop for GuestProxy {
 struct ProxyState {
     connection: Connection,
     port: u16,
+    traffic: Arc<Traffic>,
+    media: MediaHub,
 }
 
 async fn forward(State(state): State<ProxyState>, request: Request) -> Response {
@@ -91,6 +101,10 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
         .and_then(|value| value.to_str().ok())
         .filter(|value| value.len() <= 128 && value.to_ascii_lowercase().starts_with("bytes="))
         .map(str::to_string);
+    if matches!(method, crate::p2p::Method::Get | crate::p2p::Method::Head) && is_media_target(&target)
+    {
+        return state.media.serve(method, target, range).await;
+    }
     let content_type = request
         .headers()
         .get(header::CONTENT_TYPE)
@@ -115,6 +129,7 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
         Ok(frame) => frame,
         Err(err) => return locked(StatusCode::BAD_REQUEST, &err.to_string()),
     };
+    state.traffic.record_sent(frame.len() as u64);
 
     let (mut send, mut recv) = match state.connection.open_bi().await {
         Ok(streams) => streams,
@@ -132,13 +147,18 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
         Err(err) => return locked(StatusCode::BAD_GATEWAY, &err.to_string()),
     };
     let status = StatusCode::from_u16(head.status).unwrap_or(StatusCode::BAD_GATEWAY);
+    let cache_control = if head.content_type.starts_with("audio/") || head.content_type.starts_with("video/") {
+        "private, max-age=3600"
+    } else {
+        "no-store"
+    };
     let mut builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, head.content_type)
         .header(header::CONTENT_SECURITY_POLICY, PROXY_CSP)
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(header::REFERRER_POLICY, "no-referrer")
-        .header(header::CACHE_CONTROL, "no-store");
+        .header(header::CACHE_CONTROL, cache_control);
     if let Some(length) = head.content_length {
         builder = builder.header(header::CONTENT_LENGTH, length);
     }
@@ -154,7 +174,7 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     }
     builder
-        .body(Body::from_stream(body_stream(recv)))
+        .body(Body::from_stream(body_stream(recv, state.traffic)))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
@@ -194,19 +214,21 @@ fn locked(status: StatusCode, message: &str) -> Response {
 
 fn body_stream(
     recv: RecvStream,
+    traffic: Arc<Traffic>,
 ) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Send {
-    unfold((recv, false), |(mut recv, done)| async move {
+    unfold((recv, false, traffic), |(mut recv, done, traffic)| async move {
         if done {
             return None;
         }
-        let mut buf = vec![0u8; 16 * 1024];
+        let mut buf = vec![0u8; 64 * 1024];
         match AsyncReadExt::read(&mut recv, &mut buf).await {
             Ok(0) => None,
             Ok(size) => {
+                traffic.record_received(size as u64);
                 buf.truncate(size);
-                Some((Ok(Bytes::from(buf)), (recv, false)))
+                Some((Ok(Bytes::from(buf)), (recv, false, traffic)))
             }
-            Err(err) => Some((Err(std::io::Error::other(err.to_string())), (recv, true))),
+            Err(err) => Some((Err(std::io::Error::other(err.to_string())), (recv, true, traffic))),
         }
     })
 }

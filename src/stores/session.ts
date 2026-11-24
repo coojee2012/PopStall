@@ -19,6 +19,7 @@ type SessionState = {
   scanning: boolean;
   choice: StallChoice | null;
   port: string;
+  blurb: string;
   host: HostInfo | null;
   stage: StageInfo | null;
   hostBusy: boolean;
@@ -27,6 +28,7 @@ type SessionState = {
   chooseFolder: () => Promise<void>;
   setChoice: (choice: StallChoice) => void;
   setPort: (port: string) => void;
+  setBlurb: (blurb: string) => void;
   startHost: () => Promise<void>;
   stopHost: () => Promise<void>;
   openPreview: () => Promise<void>;
@@ -42,6 +44,7 @@ export const useSession = create<SessionState>((set, get) => ({
   scanning: false,
   choice: null,
   port: "3000",
+  blurb: "",
   host: null,
   stage: null,
   hostBusy: false,
@@ -71,8 +74,12 @@ export const useSession = create<SessionState>((set, get) => ({
     set({ port });
   },
 
+  setBlurb(blurb) {
+    set({ blurb: Array.from(blurb).slice(0, 100).join("") });
+  },
+
   async startHost() {
-    const { folder, choice, port } = get();
+    const { folder, choice, port, blurb } = get();
     if (!choice) {
       set({ error: "先选一种开张方式" });
       return;
@@ -85,7 +92,7 @@ export const useSession = create<SessionState>((set, get) => ({
       }
       set({ hostBusy: true, error: null });
       try {
-        const host = await api.startHost({ mode: "app", port: parsed });
+        const host = await api.startHost({ mode: "app", port: parsed, blurb });
         set({ host });
       } catch (error) {
         set({ error: errorText(error) });
@@ -100,7 +107,7 @@ export const useSession = create<SessionState>((set, get) => ({
     }
     set({ hostBusy: true, error: null });
     try {
-      const host = await api.startHost({ mode: choice, root: folder });
+      const host = await api.startHost({ mode: choice, root: folder, blurb });
       set({ host });
     } catch (error) {
       set({ error: errorText(error) });

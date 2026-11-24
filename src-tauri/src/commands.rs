@@ -37,8 +37,9 @@ pub async fn start_host(
     mode: String,
     root: Option<String>,
     port: Option<u16>,
+    blurb: Option<String>,
 ) -> Result<HostInfo, String> {
-    start_host_inner(&state, mode, root, port)
+    start_host_inner(&state, mode, root, port, blurb.unwrap_or_default())
         .await
         .map_err(|err| err.to_string())
 }
@@ -73,6 +74,25 @@ pub async fn host_status(state: State<'_, AppState>) -> Result<Option<HostInfo>,
 pub async fn list_plaza(state: State<'_, AppState>) -> Result<PlazaSnapshot, String> {
     let node = state.node().await.map_err(|err| err.to_string())?;
     Ok(node.plaza_snapshot().await)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficSnapshot {
+    pub sent: u64,
+    pub received: u64,
+}
+
+#[tauri::command]
+pub async fn traffic(state: State<'_, AppState>) -> Result<TrafficSnapshot, String> {
+    let Some(node) = state.started_node() else {
+        return Ok(TrafficSnapshot {
+            sent: 0,
+            received: 0,
+        });
+    };
+    let (sent, received) = node.traffic().snapshot();
+    Ok(TrafficSnapshot { sent, received })
 }
 
 #[tauri::command]
@@ -151,6 +171,7 @@ async fn start_host_inner(
     mode: String,
     root: Option<String>,
     port: Option<u16>,
+    blurb: String,
 ) -> anyhow::Result<HostInfo> {
     let _operation = state.host_ops.lock().await;
     let spec = prepare_spec(mode, root, port).await?;
@@ -162,7 +183,7 @@ async fn start_host_inner(
     })
     .await;
     let (title, label) = stall_blurb(&site);
-    node.announce_stall(&title, &label);
+    node.announce_stall(&title, &label, &blurb);
     let material = node.share_material().await;
     let info = HostInfo {
         share_code: material.code.clone(),
@@ -332,7 +353,8 @@ async fn open_connection_stage(
     title: &str,
     endpoint_id: String,
 ) -> anyhow::Result<StageInfo> {
-    let proxy = GuestProxy::start(connection.clone()).await?;
+    let traffic = state.node().await?.traffic();
+    let proxy = GuestProxy::start(connection.clone(), traffic).await?;
     let label = next_stage_label();
     let proxy_url = proxy.url();
     if let Err(err) = attach_stage(app, &label, &proxy_url, proxy.port) {

@@ -32,9 +32,15 @@ export type PlazaStall = {
   endpointId: string;
   title: string;
   label: string;
+  blurb: string;
 };
 
 export type PlazaSnapshot = {
   stalls: PlazaStall[];
   neighbors: number;
+};
+
+export type TrafficSnapshot = {
+  sent: number;
+  received: number;
 };

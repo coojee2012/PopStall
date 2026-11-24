@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use iroh::endpoint::presets;
@@ -9,6 +10,7 @@ use iroh_tickets::endpoint::EndpointTicket;
 
 use super::plaza::Plaza;
 use super::protocol::StallHandler;
+use super::traffic::Traffic;
 use crate::storage::load_or_create_secret_key;
 
 pub const ALPN: &[u8] = b"popstall/http/1";
@@ -27,13 +29,15 @@ pub struct Node {
     #[allow(dead_code)]
     pub router: Router,
     handler: StallHandler,
+    traffic: Arc<Traffic>,
     plaza: Option<Plaza>,
 }
 
 impl Node {
     pub async fn start(data_dir: &Path) -> anyhow::Result<Self> {
         let secret_key = load_or_create_secret_key(data_dir)?;
-        let handler = StallHandler::new();
+        let traffic = Arc::new(Traffic::default());
+        let handler = StallHandler::new(traffic.clone());
         let endpoint = bind_endpoint(secret_key).await?;
         let mut router = Router::builder(endpoint.clone()).accept(ALPN, handler.clone());
         let plaza = if cfg!(test) {
@@ -50,8 +54,13 @@ impl Node {
             endpoint,
             router,
             handler,
+            traffic,
             plaza,
         })
+    }
+
+    pub fn traffic(&self) -> Arc<Traffic> {
+        self.traffic.clone()
     }
 
     pub async fn set_host(&self, target: super::HostTarget) {
@@ -62,9 +71,9 @@ impl Node {
         self.handler.clear_host().await;
     }
 
-    pub fn announce_stall(&self, title: &str, label: &str) {
+    pub fn announce_stall(&self, title: &str, label: &str, blurb: &str) {
         if let Some(plaza) = &self.plaza {
-            plaza.announce(title, label);
+            plaza.announce(title, label, blurb);
         }
     }
 
