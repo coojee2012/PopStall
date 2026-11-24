@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use iroh::endpoint::presets;
+use iroh::endpoint::{QuicTransportConfig, VarInt, presets};
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use iroh_tickets::Ticket;
@@ -160,16 +160,34 @@ impl Node {
     }
 }
 
+fn bulk_transport() -> QuicTransportConfig {
+    // Office-to-home traffic often stays on a distant relay. Cubic keeps a tiny
+    // window there and the transfer idles between bursts. BBR holds a window
+    // sized to the path, and the larger flow-control windows let that through.
+    let mut congestion = noq_proto::congestion::Bbr3Config::default();
+    congestion.initial_window(256 * 1024);
+    QuicTransportConfig::builder()
+        .stream_receive_window(VarInt::from_u32(8 * 1024 * 1024))
+        .receive_window(VarInt::from_u32(32 * 1024 * 1024))
+        .send_window(32 * 1024 * 1024)
+        .congestion_controller_factory(Arc::new(congestion))
+        .build()
+}
+
+fn endpoint_builder(secret_key: iroh::SecretKey) -> iroh::endpoint::Builder {
+    Endpoint::builder(presets::N0)
+        .secret_key(secret_key)
+        .transport_config(bulk_transport())
+}
+
 async fn bind_endpoint(secret_key: iroh::SecretKey) -> anyhow::Result<Endpoint> {
     if cfg!(test) {
-        return Endpoint::builder(presets::N0)
-            .secret_key(secret_key)
+        return endpoint_builder(secret_key)
             .bind()
             .await
             .map_err(|err| anyhow::anyhow!("启动 P2P 节点失败: {err:?}"));
     }
-    match Endpoint::builder(presets::N0)
-        .secret_key(secret_key.clone())
+    match endpoint_builder(secret_key.clone())
         .address_lookup(iroh_mainline_address_lookup::DhtAddressLookup::builder())
         .bind()
         .await
@@ -177,8 +195,7 @@ async fn bind_endpoint(secret_key: iroh::SecretKey) -> anyhow::Result<Endpoint> 
         Ok(endpoint) => Ok(endpoint),
         Err(err) => {
             tracing::warn!(?err, "DHT address lookup did not start");
-            Endpoint::builder(presets::N0)
-                .secret_key(secret_key)
+            endpoint_builder(secret_key)
                 .bind()
                 .await
                 .map_err(|err| anyhow::anyhow!("启动 P2P 节点失败: {err:?}"))

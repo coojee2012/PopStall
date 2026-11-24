@@ -4141,6 +4141,7 @@ dependencies = [
  "iroh-mdns-address-lookup",
  "iroh-tickets",
  "mime_guess",
+ "noq-proto",
  "percent-encoding",
  "reqwest 0.12.28",
  "serde",

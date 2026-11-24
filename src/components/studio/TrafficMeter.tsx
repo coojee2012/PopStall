@@ -11,20 +11,25 @@ export function TrafficMeter({ floating = false }: { floating?: boolean }) {
     if (!desktop) {
       return;
     }
-    let last: { sent: number; received: number; at: number } | null = null;
+    const history: { sent: number; received: number; at: number }[] = [];
     let alive = true;
     const tick = async () => {
       try {
         const sample = await traffic();
         const at = performance.now();
-        if (last && alive) {
-          const seconds = Math.max(0.2, (at - last.at) / 1000);
+        history.push({ sent: sample.sent, received: sample.received, at });
+        const cutoff = at - 4000;
+        while (history.length > 1 && history[0].at < cutoff) {
+          history.shift();
+        }
+        const first = history[0];
+        const seconds = (at - first.at) / 1000;
+        if (alive && seconds >= 0.8) {
           setRates({
-            up: Math.max(0, (sample.sent - last.sent) / seconds),
-            down: Math.max(0, (sample.received - last.received) / seconds),
+            up: Math.max(0, (sample.sent - first.sent) / seconds),
+            down: Math.max(0, (sample.received - first.received) / seconds),
           });
         }
-        last = { sent: sample.sent, received: sample.received, at };
       } catch {
         if (alive) {
           setRates({ up: 0, down: 0 });
