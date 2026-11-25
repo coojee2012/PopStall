@@ -8,7 +8,7 @@ type TalkState = {
   lines: TalkLine[];
   ready: boolean;
   problem: string | null;
-  send: (text: string) => Promise<boolean>;
+  send: (text: string, name: string) => Promise<boolean>;
 };
 
 export const useTalkStore = create<TalkState>((set) => ({
@@ -16,10 +16,10 @@ export const useTalkStore = create<TalkState>((set) => ({
   ready: false,
   problem: null,
 
-  async send(text) {
+  async send(text, name) {
     set({ problem: null });
     try {
-      const snapshot = await api.talkSend(text);
+      const snapshot = await api.talkSend(text, name);
       set({ lines: snapshot.lines, ready: true });
       return true;
     } catch (error) {

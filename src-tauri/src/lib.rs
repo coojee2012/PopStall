@@ -47,6 +47,8 @@ pub fn run() {
             commands::talk_send,
             commands::traffic,
             commands::route_status,
+            commands::helper_status,
+            commands::helper_set,
             commands::open_discovered,
             commands::place_stage_bounds,
             commands::close_stage

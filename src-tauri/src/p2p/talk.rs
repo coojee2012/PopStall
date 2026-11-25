@@ -22,7 +22,9 @@ const MAGIC: &[u8; 4] = b"PTK1";
 const MAX_LINES: usize = 300;
 const MAX_CHARS: usize = 200;
 const MAX_TEXT_BYTES: usize = MAX_CHARS * 4;
-const MAX_FRAME: usize = 4 + 1 + 32 + 16 + 8 + 2 + MAX_TEXT_BYTES + 64;
+const MAX_NAME_CHARS: usize = 12;
+const MAX_NAME_BYTES: usize = MAX_NAME_CHARS * 4;
+const MAX_FRAME: usize = 4 + 1 + 32 + 16 + 8 + 2 + MAX_TEXT_BYTES + 1 + MAX_NAME_BYTES + 64;
 const SYNC_LIMIT: usize = 2 + MAX_LINES * (4 + MAX_FRAME);
 const SEND_GAP: Duration = Duration::from_millis(700);
 
@@ -36,6 +38,7 @@ struct Line {
     sender: EndpointId,
     lamport: u64,
     text: String,
+    name: String,
     raw: Vec<u8>,
 }
 
@@ -48,24 +51,26 @@ struct Room {
 }
 
 impl Room {
-    fn compose(&mut self, secret: &SecretKey, text: &str) -> Result<Vec<u8>, &'static str> {
+    fn compose(&mut self, secret: &SecretKey, text: &str, name: &str) -> Result<Vec<u8>, &'static str> {
         if let Some(previous) = self.last_sent
             && previous.elapsed() < SEND_GAP
         {
             return Err("稍等一下再发");
         }
         let text = normalize(text)?;
+        let name = normalize_name(name)?;
         self.lamport += 1;
         self.seq += 1;
         let mut id = [0u8; 16];
         id[..8].copy_from_slice(&self.seq.to_be_bytes());
         id[8..].copy_from_slice(&secret.public().as_bytes()[..8]);
-        let raw = encode(secret, id, self.lamport, &text);
+        let raw = encode(secret, id, self.lamport, &text, &name);
         self.insert(Line {
             id,
             sender: secret.public(),
             lamport: self.lamport,
             text,
+            name,
             raw: raw.clone(),
         });
         self.last_sent = Some(Instant::now());
@@ -170,16 +175,31 @@ fn normalize(text: &str) -> Result<String, &'static str> {
     Ok(trimmed.to_string())
 }
 
-fn encode(secret: &SecretKey, id: [u8; 16], lamport: u64, text: &str) -> Vec<u8> {
-    let mut body = Vec::with_capacity(128 + text.len());
+fn normalize_name(name: &str) -> Result<String, &'static str> {
+    let cleaned: String = name
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.chars().count() > MAX_NAME_CHARS {
+        return Err("名字最多 12 个字");
+    }
+    Ok(trimmed.to_string())
+}
+
+fn encode(secret: &SecretKey, id: [u8; 16], lamport: u64, text: &str, name: &str) -> Vec<u8> {
+    let mut body = Vec::with_capacity(160 + text.len() + name.len());
     body.extend_from_slice(MAGIC);
-    body.push(1);
+    body.push(2);
     body.extend_from_slice(secret.public().as_bytes());
     body.extend_from_slice(&id);
     body.extend_from_slice(&lamport.to_be_bytes());
     let bytes = text.as_bytes();
     body.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
     body.extend_from_slice(bytes);
+    let name_bytes = name.as_bytes();
+    body.push(name_bytes.len() as u8);
+    body.extend_from_slice(name_bytes);
     let signature = secret.sign(&body);
     body.extend_from_slice(&signature.to_bytes());
     body
@@ -193,20 +213,36 @@ fn decode(bytes: &[u8]) -> Option<Line> {
     let signed = &bytes[..signed_len];
     let mut cursor = &bytes[4..signed_len];
     let version = take_u8(&mut cursor)?;
-    if version != 1 {
+    if version != 1 && version != 2 {
         return None;
     }
     let sender = EndpointId::from_bytes(&take_array::<32>(&mut cursor)?).ok()?;
     let id = take_array::<16>(&mut cursor)?;
     let lamport = u64::from_be_bytes(take_array::<8>(&mut cursor)?);
     let text_len = u16::from_be_bytes(take_array::<2>(&mut cursor)?) as usize;
-    if text_len == 0 || text_len > MAX_TEXT_BYTES || cursor.len() != text_len {
+    if text_len == 0 || text_len > MAX_TEXT_BYTES || cursor.len() < text_len {
         return None;
     }
-    let text = std::str::from_utf8(cursor).ok()?.to_string();
+    let text = std::str::from_utf8(&cursor[..text_len]).ok()?.to_string();
+    cursor = &cursor[text_len..];
     if text.chars().any(|ch| ch.is_control()) || text.chars().count() > MAX_CHARS || text.trim().is_empty() {
         return None;
     }
+    let name = if version >= 2 {
+        let name_len = take_u8(&mut cursor)? as usize;
+        if name_len > MAX_NAME_BYTES || cursor.len() != name_len {
+            return None;
+        }
+        let name = std::str::from_utf8(cursor).ok()?.to_string();
+        if name.chars().any(|ch| ch.is_control()) || name.chars().count() > MAX_NAME_CHARS || name != name.trim() {
+            return None;
+        }
+        name
+    } else if cursor.is_empty() {
+        String::new()
+    } else {
+        return None;
+    };
     let signature = Signature::from_bytes(&bytes[signed_len..].try_into().ok()?);
     sender.verify(signed, &signature).ok()?;
     if lamport == 0 {
@@ -217,6 +253,7 @@ fn decode(bytes: &[u8]) -> Option<Line> {
         sender,
         lamport,
         text,
+        name,
         raw: bytes.to_vec(),
     })
 }
@@ -272,6 +309,7 @@ impl ProtocolHandler for TalkHandler {
 pub struct TalkLineDto {
     pub id: String,
     pub sender_id: String,
+    pub name: String,
     pub text: String,
     pub mine: bool,
 }
@@ -296,16 +334,17 @@ impl Talk {
             .map(|line| TalkLineDto {
                 id: hex_id(&line.id),
                 sender_id: line.sender.to_string(),
+                name: line.name.clone(),
                 text: line.text.clone(),
                 mine: line.sender == mine,
             })
             .collect()
     }
 
-    pub async fn say(&self, text: &str) -> Result<(), String> {
+    pub async fn say(&self, text: &str, name: &str) -> Result<(), String> {
         let raw = {
             let mut room = self.room.lock().await;
-            room.compose(&self.secret, text).map_err(str::to_string)?
+            room.compose(&self.secret, text, name).map_err(str::to_string)?
         };
         let _ = self.tx.try_send(TalkCmd::Send(raw));
         Ok(())
@@ -461,8 +500,8 @@ mod tests {
             seq: 0,
             last_sent: None,
         };
-        let first = encode(&alice, [1; 16], 5, "后说的");
-        let second = encode(&bob, [2; 16], 2, "先发生");
+        let first = encode(&alice, [1; 16], 5, "后说的", "阿宁");
+        let second = encode(&bob, [2; 16], 2, "先发生", "");
         assert!(room.ingest_frame(&first));
         assert!(room.ingest_frame(&second));
         assert!(!room.ingest_frame(&first));
@@ -472,7 +511,7 @@ mod tests {
         for number in 0..MAX_LINES {
             let mut id = [9u8; 16];
             id[..8].copy_from_slice(&(number as u64).to_be_bytes());
-            let frame = encode(&alice, id, 10 + number as u64, "又一句");
+            let frame = encode(&alice, id, 10 + number as u64, "又一句", "阿宁");
             assert!(room.ingest_frame(&frame));
         }
         assert_eq!(room.lines.len(), MAX_LINES);
@@ -489,9 +528,12 @@ mod tests {
             seq: 0,
             last_sent: None,
         };
-        kept.compose(&alice, " 夜里见 ").unwrap();
+        kept.compose(&alice, " 夜里见 ", " 阿宁 ").unwrap();
         kept.last_sent = None;
-        kept.compose(&alice, "还在").unwrap();
+        kept.compose(&alice, "还在", "阿宁").unwrap();
+        assert_eq!(kept.lines[0].name, "阿宁");
+        kept.last_sent = None;
+        assert!(kept.compose(&alice, "太长", "一二三四五六七八九十一二三四").is_err());
         let blob = kept.export_blob();
 
         let mut arrived = Room {

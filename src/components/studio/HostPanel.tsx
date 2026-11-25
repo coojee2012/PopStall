@@ -6,6 +6,7 @@ import type { ScanReport, StallChoice, ThemeId } from "../../types/ipc";
 import { StatusDot } from "../common/StatusDot";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
+import { HelperRelayCard } from "./HelperRelayCard";
 
 const themes: { id: ThemeId; label: string; unit: string }[] = [
   { id: "image", label: "图片", unit: "张" },
@@ -74,6 +75,7 @@ export function HostPanel() {
   const ready = appMode ? canOpen("app", Boolean(folder), Boolean(scan)) : canOpen(folderChoice, Boolean(folder), Boolean(scan));
 
   return (
+    <div className="flex flex-col gap-4">
     <Card className="flex flex-col gap-5">
       {host ? (
         <LiveStall
@@ -190,6 +192,8 @@ export function HostPanel() {
         </>
       )}
     </Card>
+    <HelperRelayCard />
+    </div>
   );
 }
 

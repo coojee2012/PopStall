@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { HostInfo, PlazaSnapshot, RouteStatus, ScanReport, StageInfo, TalkSnapshot, TrafficSnapshot } from "../types/ipc";
+import type { HelperStatus, HostInfo, PlazaSnapshot, RouteStatus, ScanReport, StageInfo, TalkSnapshot, TrafficSnapshot } from "../types/ipc";
 
 export function inDesktopApp(): boolean {
   return isTauri();
@@ -78,14 +78,24 @@ export function routeStatus(): Promise<RouteStatus> {
   return invoke("route_status");
 }
 
+export function helperStatus(): Promise<HelperStatus> {
+  assertDesktop();
+  return invoke("helper_status");
+}
+
+export function helperSet(enabled: boolean, limitBps?: number): Promise<HelperStatus> {
+  assertDesktop();
+  return invoke("helper_set", { enabled, limitBps: limitBps ?? null });
+}
+
 export function talkSnapshot(): Promise<TalkSnapshot> {
   assertDesktop();
   return invoke("talk_snapshot");
 }
 
-export function talkSend(text: string): Promise<TalkSnapshot> {
+export function talkSend(text: string, name: string): Promise<TalkSnapshot> {
   assertDesktop();
-  return invoke("talk_send", { text });
+  return invoke("talk_send", { text, name });
 }
 
 export function openDiscovered(endpointId: string, title: string, password?: string): Promise<StageInfo> {

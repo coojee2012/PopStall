@@ -49,11 +49,22 @@ export type TrafficSnapshot = {
 
 export type RouteStatus = {
   relayOnly: boolean;
+  viaHelper: boolean;
+  helperOffers: number;
+};
+
+export type HelperStatus = {
+  enabled: boolean;
+  limitBps: number;
+  active: number;
+  offers: number;
+  viaHelper: boolean;
 };
 
 export type TalkLine = {
   id: string;
   senderId: string;
+  name: string;
   text: string;
   mine: boolean;
 };

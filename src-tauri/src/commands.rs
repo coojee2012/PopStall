@@ -77,12 +77,53 @@ pub async fn host_status(state: State<'_, AppState>) -> Result<Option<HostInfo>,
 #[serde(rename_all = "camelCase")]
 pub struct RouteStatus {
     pub relay_only: bool,
+    pub via_helper: bool,
+    pub helper_offers: usize,
 }
 
 #[tauri::command]
 pub async fn route_status(state: State<'_, AppState>) -> Result<RouteStatus, String> {
-    let relay_only = state.started_node().is_some_and(|node| node.relay_only());
-    Ok(RouteStatus { relay_only })
+    let Some(node) = state.started_node() else {
+        return Ok(RouteStatus {
+            relay_only: false,
+            via_helper: false,
+            helper_offers: 0,
+        });
+    };
+    let helper = node.helper_status().await;
+    Ok(RouteStatus {
+        relay_only: node.relay_only() && !helper.via_helper,
+        via_helper: helper.via_helper,
+        helper_offers: helper.offers,
+    })
+}
+
+#[tauri::command]
+pub async fn helper_status(
+    state: State<'_, AppState>,
+) -> Result<crate::p2p::helper::HelperStatus, String> {
+    let Some(node) = state.started_node() else {
+        return Ok(crate::p2p::helper::HelperStatus {
+            enabled: false,
+            limit_bps: crate::p2p::helper::DEFAULT_LIMIT_BPS,
+            active: 0,
+            offers: 0,
+            via_helper: false,
+        });
+    };
+    Ok(node.helper_status().await)
+}
+
+#[tauri::command]
+pub async fn helper_set(
+    state: State<'_, AppState>,
+    enabled: bool,
+    limit_bps: Option<u32>,
+) -> Result<crate::p2p::helper::HelperStatus, String> {
+    let node = state.node().await.map_err(|err| err.to_string())?;
+    let limit = limit_bps.unwrap_or(crate::p2p::helper::DEFAULT_LIMIT_BPS);
+    node.helper_set(enabled, limit).await?;
+    Ok(node.helper_status().await)
 }
 
 #[tauri::command]
@@ -108,9 +149,9 @@ pub async fn talk_snapshot(state: State<'_, AppState>) -> Result<TalkSnapshot, S
 }
 
 #[tauri::command]
-pub async fn talk_send(state: State<'_, AppState>, text: String) -> Result<TalkSnapshot, String> {
+pub async fn talk_send(state: State<'_, AppState>, text: String, name: Option<String>) -> Result<TalkSnapshot, String> {
     let node = state.node().await.map_err(|err| err.to_string())?;
-    node.talk_say(&text).await?;
+    node.talk_say(&text, name.as_deref().unwrap_or("")).await?;
     Ok(TalkSnapshot {
         lines: node.talk_lines().await,
     })
@@ -488,6 +529,9 @@ async fn dismiss_stage(app: &AppHandle, state: &AppState) {
         if let Some(guest) = stage.guest {
             guest.shutdown();
         }
+    }
+    if let Some(node) = state.started_node() {
+        node.clear_via_helper();
     }
 }
 

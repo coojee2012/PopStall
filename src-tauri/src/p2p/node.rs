@@ -10,6 +10,7 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
 use iroh_tickets::Ticket;
 use iroh_tickets::endpoint::EndpointTicket;
 
+use super::helper::HelperHub;
 use super::plaza::Plaza;
 use super::protocol::StallHandler;
 use super::talk::Talk;
@@ -63,6 +64,7 @@ pub struct Node {
     routes: Arc<RouteBook>,
     plaza: Option<Plaza>,
     talk: Option<Talk>,
+    helper: Option<HelperHub>,
 }
 
 impl Node {
@@ -73,16 +75,18 @@ impl Node {
         let handler = StallHandler::new(traffic.clone(), routes.clone());
         let endpoint = bind_endpoint(secret_key).await?;
         let mut router = Router::builder(endpoint.clone()).accept(ALPN, handler.clone());
-        let (plaza, talk) = if cfg!(test) {
-            (None, None)
+        let (plaza, talk, helper) = if cfg!(test) {
+            (None, None, None)
         } else {
             let mdns = super::plaza::attach_mdns(&endpoint);
             let gossip = iroh_gossip::Gossip::builder().spawn(endpoint.clone());
             router = router.accept(iroh_gossip::ALPN, gossip.clone());
             let plaza = super::plaza::start(endpoint.clone(), gossip.clone(), mdns);
-            let talk = super::talk::start(endpoint.clone(), gossip, plaza.clone());
+            let talk = super::talk::start(endpoint.clone(), gossip.clone(), plaza.clone());
             router = router.accept(super::talk::ALPN, talk.handler());
-            (Some(plaza), Some(talk))
+            let helper = super::helper::start(endpoint.clone(), gossip, plaza.clone());
+            router = router.accept(super::helper::ALPN, helper.handler());
+            (Some(plaza), Some(talk), Some(helper))
         };
         let router = router.spawn();
         let locals: Vec<String> = endpoint
@@ -99,6 +103,7 @@ impl Node {
             routes,
             plaza,
             talk,
+            helper,
         })
     }
 
@@ -109,11 +114,37 @@ impl Node {
         }
     }
 
-    pub async fn talk_say(&self, text: &str) -> Result<(), String> {
+    pub async fn talk_say(&self, text: &str, name: &str) -> Result<(), String> {
         let Some(talk) = &self.talk else {
             return Err("夜谈还没有接上".to_string());
         };
-        talk.say(text).await
+        talk.say(text, name).await
+    }
+
+    pub async fn helper_status(&self) -> super::helper::HelperStatus {
+        match &self.helper {
+            Some(helper) => helper.status().await,
+            None => super::helper::HelperStatus {
+                enabled: false,
+                limit_bps: super::helper::DEFAULT_LIMIT_BPS,
+                active: 0,
+                offers: 0,
+                via_helper: false,
+            },
+        }
+    }
+
+    pub async fn helper_set(&self, enabled: bool, limit_bps: u32) -> Result<(), String> {
+        let Some(helper) = &self.helper else {
+            return Err("互助中继还没有接上".to_string());
+        };
+        helper.set(enabled, limit_bps).await
+    }
+
+    pub fn clear_via_helper(&self) {
+        if let Some(helper) = &self.helper {
+            helper.set_via_helper(false);
+        }
     }
 
     pub fn traffic(&self) -> Arc<Traffic> {
@@ -179,13 +210,15 @@ impl Node {
             .map_err(|err| anyhow::anyhow!("分享码无法解析: {err:?}"))?;
         let addr = ticket.endpoint_addr().clone();
         self.ensure_not_self(addr.id)?;
+        let target = addr.id;
         let dial = if addr.relay_urls().next().is_some() {
             addr
         } else {
             tracing::info!("share code has no relay; resolving the endpoint id");
-            EndpointAddr::from(addr.id)
+            EndpointAddr::from(target)
         };
-        self.dial(dial).await
+        let direct = self.dial(dial).await?;
+        Ok(self.maybe_via_helper(target, direct).await)
     }
 
     pub async fn connect_endpoint(&self, endpoint_id: &str) -> anyhow::Result<iroh::endpoint::Connection> {
@@ -194,7 +227,24 @@ impl Node {
             .parse()
             .map_err(|_| anyhow::anyhow!("这个摊位的地址无效"))?;
         self.ensure_not_self(id)?;
-        self.dial(EndpointAddr::from(id)).await
+        let direct = self.dial(EndpointAddr::from(id)).await?;
+        Ok(self.maybe_via_helper(id, direct).await)
+    }
+
+    async fn maybe_via_helper(&self, target: EndpointId, direct: Connection) -> Connection {
+        let Some(helper) = &self.helper else {
+            return direct;
+        };
+        let (connection, via) = super::helper::connect_preferring_helper(
+            &self.endpoint,
+            &helper.book(),
+            target,
+            direct,
+            self.routes.clone(),
+        )
+        .await;
+        helper.set_via_helper(via);
+        connection
     }
 
     pub fn endpoint_id_of(share_code: &str) -> anyhow::Result<String> {
