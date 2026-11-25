@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_util::StreamExt;
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::{presets, Connection, RecvStream, RelayMode, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId, PublicKey, SecretKey, Signature};
 use iroh_gossip::{Event, Gossip, GossipSender, JoinOptions, TopicId};
@@ -29,9 +29,9 @@ const MAX_SESSIONS: usize = 4;
 const CARD_TTL_SECS: u32 = 90;
 const TICK: Duration = Duration::from_secs(10);
 const PATH_WAIT: Duration = Duration::from_secs(3);
-/// Longer wait when the helper card already carries a public dial address.
-const PATH_WAIT_KNOWN: Duration = Duration::from_secs(10);
 const HELPER_DIAL: Duration = Duration::from_secs(8);
+/// Hard timeout for IP-only dials (no relay, no path-upgrade wait).
+const IP_ONLY_DIAL: Duration = Duration::from_secs(6);
 const HOST_DIAL: Duration = Duration::from_secs(20);
 const RENDEZVOUS_WAIT: Duration = Duration::from_secs(12);
 /// Guest waits for helper hello-ack through rendezvous or fallback dial.
@@ -774,10 +774,20 @@ async fn broadcast_open(
 ) {
     let load = active.load(Ordering::Relaxed).min(255) as u8;
     let addrs = dialable_addrs(endpoint, stored_listen_port(listen_port));
+    // Tell iroh itself about the forwarded WAN socket so path selection / disco
+    // use the same port we put on the helper card (not a random STUN mapping).
+    publish_external_addrs(endpoint, &addrs).await;
     let bytes = encode_open(secret, limit_bps.load(Ordering::Relaxed), load, &addrs);
     match sender.broadcast(Bytes::from(bytes)).await {
         Ok(()) => tracing::info!(?addrs, "已广播互助中继"),
         Err(err) => tracing::warn!(?err, "互助中继广播失败"),
+    }
+}
+
+async fn publish_external_addrs(endpoint: &Endpoint, addrs: &[SocketAddr]) {
+    for addr in addrs {
+        endpoint.add_external_addr(*addr).await;
+        crate::netdebug::log(format!("helper_external_addr {addr}"));
     }
 }
 
@@ -864,17 +874,60 @@ pub async fn probe_offers(
             continue;
         }
         let started = Instant::now();
+        // Card already has a WAN socket: probe it with a relay-disabled endpoint.
+        // The main endpoint merges cached n0 relays and happily "connects" via relay
+        // while never opening an IP path — that made refresh look stuck for 10s+.
+        if !live.addrs.is_empty() {
+            match connect_ip_only(id, &live.addrs, ALPN, IP_ONLY_DIAL).await {
+                Ok(connection) => {
+                    let rtt_ms =
+                        started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+                    crate::netdebug::log(format!(
+                        "probe_result helper={id} mode=ip_only direct=true rtt_ms={rtt_ms} paths={}",
+                        describe_conn_paths(&connection)
+                    ));
+                    connection.close(0u8.into(), b"probe");
+                    out.push(HelperOffer {
+                        endpoint_id: id.to_string(),
+                        limit_bps: live.limit_bps,
+                        load: live.load,
+                        rtt_ms: Some(rtt_ms),
+                        direct: true,
+                        usable: true,
+                        note: format!("公网直拨成功 · 约 {rtt_ms} ms"),
+                    });
+                }
+                Err(err) => {
+                    crate::netdebug::log(format!(
+                        "probe_result helper={id} mode=ip_only direct=false err={err} elapsed_ms={}",
+                        started.elapsed().as_millis()
+                    ));
+                    out.push(HelperOffer {
+                        endpoint_id: id.to_string(),
+                        limit_bps: live.limit_bps,
+                        load: live.load,
+                        rtt_ms: None,
+                        direct: false,
+                        usable: false,
+                        note: format!(
+                            "公网 {} 直拨失败：检查端口转发/防火墙，或对方闪摊未在该端口监听",
+                            live.addrs
+                                .first()
+                                .map(|a| a.to_string())
+                                .unwrap_or_default()
+                        ),
+                    });
+                }
+            }
+            continue;
+        }
+
         let dial = helper_endpoint_addr(id, &live.addrs);
-        let path_wait = if live.addrs.is_empty() {
-            PATH_WAIT
-        } else {
-            PATH_WAIT_KNOWN
-        };
         crate::netdebug::log(format!(
             "probe_dial helper={id} card_addrs={:?} dial={} path_wait_ms={}",
             live.addrs,
             format_endpoint_addr(&dial),
-            path_wait.as_millis()
+            PATH_WAIT.as_millis()
         ));
         match tokio::time::timeout(Duration::from_secs(15), endpoint.connect(dial, ALPN)).await
         {
@@ -884,11 +937,10 @@ pub async fn probe_offers(
                     started.elapsed().as_millis(),
                     describe_conn_paths(&connection)
                 ));
-                // Hole punch often finishes after the first relay path; wait before judging.
-                let direct = wait_until_direct(&connection, path_wait).await;
+                let direct = wait_until_direct(&connection, PATH_WAIT).await;
                 let rtt_ms = started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
                 crate::netdebug::log(format!(
-                    "probe_result helper={id} direct={direct} rtt_ms={rtt_ms} paths={}",
+                    "probe_result helper={id} mode=hole_punch direct={direct} rtt_ms={rtt_ms} paths={}",
                     describe_conn_paths(&connection)
                 ));
                 connection.close(0u8.into(), b"probe");
@@ -901,10 +953,8 @@ pub async fn probe_offers(
                     usable: direct,
                     note: if direct {
                         format!("可直连 · 约 {rtt_ms} ms")
-                    } else if live.addrs.is_empty() {
-                        "连上了，但仍在走公共中继（对方没广播到公网地址）".to_string()
                     } else {
-                        "连上了，但仍在走公共中继：公司网可能拦了直连 UDP，或对方公网端口打不进来".to_string()
+                        "连上了，但仍在走公共中继（对方没广播到公网地址）".to_string()
                     },
                 });
             }
@@ -1112,21 +1162,95 @@ fn helper_endpoint_addr(id: EndpointId, addrs: &[SocketAddr]) -> EndpointAddr {
     addr
 }
 
+/// Shared relay-disabled endpoint so public-IP dials never fall back to n0.
+async fn ip_only_endpoint() -> anyhow::Result<Endpoint> {
+    static CELL: OnceLock<Mutex<Option<Endpoint>>> = OnceLock::new();
+    let cell = CELL.get_or_init(|| Mutex::new(None));
+    let mut slot = cell.lock().await;
+    if let Some(existing) = slot.as_ref() {
+        if !existing.is_closed() {
+            return Ok(existing.clone());
+        }
+    }
+    let fresh = Endpoint::builder(presets::Empty)
+        .secret_key(SecretKey::generate())
+        .relay_mode(RelayMode::Disabled)
+        .bind()
+        .await
+        .map_err(|err| anyhow::anyhow!("直连探测端点启动失败: {err:?}"))?;
+    crate::netdebug::log(format!(
+        "ip_only_endpoint_bound self={} sockets={:?}",
+        fresh.id(),
+        fresh.bound_sockets()
+    ));
+    *slot = Some(fresh.clone());
+    Ok(fresh)
+}
+
+/// Dial `id` using only the given sockets — no relay, no main-endpoint address book.
+async fn connect_ip_only(
+    id: EndpointId,
+    addrs: &[SocketAddr],
+    alpn: &[u8],
+    timeout: Duration,
+) -> anyhow::Result<Connection> {
+    if addrs.is_empty() {
+        anyhow::bail!("没有公网地址可直拨");
+    }
+    let ep = ip_only_endpoint().await?;
+    let dial = helper_endpoint_addr(id, addrs);
+    crate::netdebug::log(format!(
+        "ip_only_dial helper={id} dial={}",
+        format_endpoint_addr(&dial)
+    ));
+    let started = Instant::now();
+    let connection = tokio::time::timeout(timeout, ep.connect(dial, alpn))
+        .await
+        .map_err(|_| anyhow::anyhow!("公网直拨超时"))?
+        .map_err(|err| anyhow::anyhow!("公网直拨失败: {err:?}"))?;
+    crate::netdebug::log(format!(
+        "ip_only_connected helper={id} elapsed_ms={} paths={}",
+        started.elapsed().as_millis(),
+        describe_conn_paths(&connection)
+    ));
+    Ok(connection)
+}
+
 async fn dial_helper(
     endpoint: &Endpoint,
     helper: EndpointId,
     target: EndpointId,
     addrs: &[SocketAddr],
 ) -> anyhow::Result<Connection> {
-    let dial = helper_endpoint_addr(helper, addrs);
-    crate::netdebug::log(format!(
-        "session_dial helper={helper} target={target} dial={}",
-        format_endpoint_addr(&dial)
-    ));
-    let connection = endpoint
-        .connect(dial, ALPN)
-        .await
-        .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+    let connection = if !addrs.is_empty() {
+        match connect_ip_only(helper, addrs, ALPN, HELPER_DIAL).await {
+            Ok(conn) => conn,
+            Err(err) => {
+                crate::netdebug::log(format!(
+                    "session_ip_only_fail helper={helper} err={err}; fallback_main"
+                ));
+                let dial = helper_endpoint_addr(helper, addrs);
+                crate::netdebug::log(format!(
+                    "session_dial helper={helper} target={target} dial={}",
+                    format_endpoint_addr(&dial)
+                ));
+                endpoint
+                    .connect(dial, ALPN)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e:?}"))?
+            }
+        }
+    } else {
+        let dial = helper_endpoint_addr(helper, addrs);
+        crate::netdebug::log(format!(
+            "session_dial helper={helper} target={target} dial={}",
+            format_endpoint_addr(&dial)
+        ));
+        endpoint
+            .connect(dial, ALPN)
+            .await
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?
+    };
     crate::netdebug::log(format!(
         "session_connected helper={helper} paths={}",
         describe_conn_paths(&connection)
@@ -1196,20 +1320,32 @@ async fn answer_invite(
     if !stall.is_hosting().await {
         anyhow::bail!("摊位已打烊");
     }
-    let dial = helper_endpoint_addr(invite.helper_id, &invite.addrs);
     crate::netdebug::log(format!(
-        "host_callback_dial helper={} session={:02x?} dial={}",
-        invite.helper_id,
-        invite.session,
-        format_endpoint_addr(&dial)
+        "host_callback_dial helper={} session={:02x?} addrs={:?}",
+        invite.helper_id, invite.session, invite.addrs
     ));
-    let connection = tokio::time::timeout(
-        HELPER_DIAL,
-        endpoint.connect(dial, ALPN),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("回连帮手超时"))?
-    .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+    let connection = if !invite.addrs.is_empty() {
+        match connect_ip_only(invite.helper_id, &invite.addrs, ALPN, HELPER_DIAL).await {
+            Ok(conn) => conn,
+            Err(err) => {
+                crate::netdebug::log(format!(
+                    "host_callback_ip_only_fail helper={} err={err}; fallback_main",
+                    invite.helper_id
+                ));
+                let dial = helper_endpoint_addr(invite.helper_id, &invite.addrs);
+                tokio::time::timeout(HELPER_DIAL, endpoint.connect(dial, ALPN))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("回连帮手超时"))?
+                    .map_err(|e| anyhow::anyhow!("{e:?}"))?
+            }
+        }
+    } else {
+        let dial = helper_endpoint_addr(invite.helper_id, &invite.addrs);
+        tokio::time::timeout(HELPER_DIAL, endpoint.connect(dial, ALPN))
+            .await
+            .map_err(|_| anyhow::anyhow!("回连帮手超时"))?
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?
+    };
     crate::netdebug::log(format!(
         "host_callback_connected helper={} paths={}",
         invite.helper_id,
