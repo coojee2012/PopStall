@@ -1108,6 +1108,15 @@ fn is_globally_reachable_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Public IP:port pairs peers should dial (optionally forcing the forwarded port).
+pub(crate) fn public_dial_addrs(endpoint: &Endpoint, force_port: Option<u16>) -> Vec<SocketAddr> {
+    dialable_addrs(endpoint, force_port)
+}
+
+pub(crate) fn connection_is_direct(connection: &Connection) -> bool {
+    path_looks_direct(connection)
+}
+
 fn dialable_addrs(endpoint: &Endpoint, force_port: Option<u16>) -> Vec<SocketAddr> {
     let mut out: Vec<SocketAddr> = endpoint
         .addr()
@@ -1207,7 +1216,7 @@ async fn ip_only_endpoint() -> anyhow::Result<Endpoint> {
 }
 
 /// Dial `id` using only the given sockets — no relay, no main-endpoint address book.
-async fn connect_ip_only(
+pub(crate) async fn connect_ip_only(
     id: EndpointId,
     addrs: &[SocketAddr],
     alpn: &[u8],

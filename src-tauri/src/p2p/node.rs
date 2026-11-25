@@ -16,6 +16,7 @@ use super::plaza::Plaza;
 use super::protocol::StallHandler;
 use super::talk::Talk;
 use super::traffic::Traffic;
+use super::visit::VisitHub;
 use crate::storage::load_or_create_secret_key;
 
 pub const ALPN: &[u8] = b"popstall/http/1";
@@ -94,6 +95,7 @@ pub struct Node {
     plaza: Option<Plaza>,
     talk: Option<Talk>,
     helper: Option<HelperHub>,
+    visit: Option<VisitHub>,
 }
 
 impl Node {
@@ -107,8 +109,8 @@ impl Node {
         let handler = StallHandler::new(traffic.clone(), routes.clone());
         let endpoint = bind_endpoint(secret_key, listen_port).await?;
         let mut router = Router::builder(endpoint.clone()).accept(ALPN, handler.clone());
-        let (plaza, talk, helper) = if cfg!(test) {
-            (None, None, None)
+        let (plaza, talk, helper, visit) = if cfg!(test) {
+            (None, None, None, None)
         } else {
             let mdns = super::plaza::attach_mdns(&endpoint);
             let gossip = iroh_gossip::Gossip::builder().spawn(endpoint.clone());
@@ -125,10 +127,13 @@ impl Node {
                 data_dir.to_path_buf(),
                 listen_port,
             );
+            let visit = super::visit::VisitHub::new(endpoint.clone(), handler.clone(), listen_port);
             router = router
                 .accept(super::helper::ALPN, helper.handler())
-                .accept(super::helper::INVITE_ALPN, helper.invite_handler());
-            (Some(plaza), Some(talk), Some(helper))
+                .accept(super::helper::INVITE_ALPN, helper.invite_handler())
+                .accept(super::visit::CB_ALPN, visit.callback_handler())
+                .accept(super::visit::INVITE_ALPN, visit.invite_handler());
+            (Some(plaza), Some(talk), Some(helper), Some(visit))
         };
         let router = router.spawn();
         let locals: Vec<String> = endpoint
@@ -161,6 +166,7 @@ impl Node {
             plaza,
             talk,
             helper,
+            visit,
         })
     }
 
@@ -206,6 +212,10 @@ impl Node {
         let Some(helper) = &self.helper else {
             return Err("互助中继还没有接上".to_string());
         };
+        let port = crate::storage::helper_prefs::normalize_port(listen_port);
+        if let Some(visit) = &self.visit {
+            visit.set_listen_port(port);
+        }
         helper.set(enabled, limit_bps, listen_port).await
     }
 
@@ -323,8 +333,13 @@ impl Node {
             tracing::info!("share code has no relay; resolving the endpoint id");
             EndpointAddr::from(target)
         };
-        let direct = self.dial(dial).await?;
-        Ok(self.maybe_via_helper(target, direct).await)
+        match self.dial(dial).await {
+            Ok(direct) => Ok(self.upgrade_path(target, direct).await),
+            Err(err) => self
+                .try_callback_visit(target)
+                .await
+                .map_err(|cb_err| anyhow::anyhow!("{err}；回拨也失败: {cb_err}")),
+        }
     }
 
     pub async fn connect_endpoint(&self, endpoint_id: &str) -> anyhow::Result<iroh::endpoint::Connection> {
@@ -333,24 +348,64 @@ impl Node {
             .parse()
             .map_err(|_| anyhow::anyhow!("这个摊位的地址无效"))?;
         self.ensure_not_self(id)?;
-        let direct = self.dial(EndpointAddr::from(id)).await?;
-        Ok(self.maybe_via_helper(id, direct).await)
+        match self.dial(EndpointAddr::from(id)).await {
+            Ok(direct) => Ok(self.upgrade_path(id, direct).await),
+            Err(err) => self
+                .try_callback_visit(id)
+                .await
+                .map_err(|cb_err| anyhow::anyhow!("{err}；回拨也失败: {cb_err}")),
+        }
     }
 
-    async fn maybe_via_helper(&self, target: EndpointId, direct: Connection) -> Connection {
-        let Some(helper) = &self.helper else {
+    /// Prefer direct, then mutual helper, then callback visit when we are dialable.
+    async fn upgrade_path(&self, target: EndpointId, direct: Connection) -> Connection {
+        if super::helper::connection_is_direct(&direct) {
+            if let Some(helper) = &self.helper {
+                helper.set_via_helper(false);
+            }
             return direct;
+        }
+        let after_helper = if let Some(helper) = &self.helper {
+            let (connection, via) = super::helper::connect_preferring_helper(
+                &self.endpoint,
+                &helper.book(),
+                target,
+                direct,
+                self.routes.clone(),
+            )
+            .await;
+            helper.set_via_helper(via);
+            if via || super::helper::connection_is_direct(&connection) {
+                return connection;
+            }
+            connection
+        } else {
+            direct
         };
-        let (connection, via) = super::helper::connect_preferring_helper(
-            &self.endpoint,
-            &helper.book(),
-            target,
-            direct,
-            self.routes.clone(),
-        )
-        .await;
-        helper.set_via_helper(via);
-        connection
+        match self.try_callback_visit(target).await {
+            Ok(callback) => {
+                after_helper.close(0u8.into(), b"visit-cb");
+                if let Some(helper) = &self.helper {
+                    helper.set_via_helper(false);
+                }
+                callback
+            }
+            Err(err) => {
+                crate::netdebug::log(format!(
+                    "visit_callback_skip target={target} err={err}"
+                ));
+                after_helper
+            }
+        }
+    }
+
+    async fn try_callback_visit(&self, host: EndpointId) -> anyhow::Result<Connection> {
+        let Some(visit) = &self.visit else {
+            anyhow::bail!("回拨串门不可用");
+        };
+        let connection = visit.connect_via_callback(host).await?;
+        watch_paths(connection.clone(), "visit-cb", self.routes.clone());
+        Ok(connection)
     }
 
     pub fn endpoint_id_of(share_code: &str) -> anyhow::Result<String> {
@@ -400,6 +455,9 @@ pub(crate) fn watch_paths(connection: Connection, role: &'static str, routes: Ar
         }
         if role == "helper" {
             routes.set_path_label(&key, "互助中继（直连帮手）".to_string());
+        }
+        if role == "visit-cb" {
+            routes.set_path_label(&key, "回拨直连".to_string());
         }
     }
     let mut relay_since = (selected_is_relay(&connection) == Some(true)).then(Instant::now);
@@ -506,6 +564,9 @@ fn path_kind(addr: &TransportAddr) -> &'static str {
 fn path_label(addr: &TransportAddr, role: &str) -> String {
     if role == "helper" {
         return "互助中继（直连帮手）".to_string();
+    }
+    if role == "visit-cb" {
+        return "回拨直连".to_string();
     }
     if addr.is_relay() {
         let raw = addr.to_string();

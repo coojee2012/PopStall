@@ -8,6 +8,7 @@ mod plaza;
 mod protocol;
 pub(crate) mod talk;
 mod traffic;
+pub(crate) mod visit;
 
 pub use frame::{Method, RequestFrame, encode_request};
 pub use io::read_response_head;
