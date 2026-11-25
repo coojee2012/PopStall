@@ -93,6 +93,31 @@ pub async fn list_plaza(state: State<'_, AppState>) -> Result<PlazaSnapshot, Str
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TalkSnapshot {
+    pub lines: Vec<crate::p2p::talk::TalkLineDto>,
+}
+
+#[tauri::command]
+pub async fn talk_snapshot(state: State<'_, AppState>) -> Result<TalkSnapshot, String> {
+    let Some(node) = state.started_node() else {
+        return Ok(TalkSnapshot { lines: Vec::new() });
+    };
+    Ok(TalkSnapshot {
+        lines: node.talk_lines().await,
+    })
+}
+
+#[tauri::command]
+pub async fn talk_send(state: State<'_, AppState>, text: String) -> Result<TalkSnapshot, String> {
+    let node = state.node().await.map_err(|err| err.to_string())?;
+    node.talk_say(&text).await?;
+    Ok(TalkSnapshot {
+        lines: node.talk_lines().await,
+    })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TrafficSnapshot {
     pub sent: u64,
     pub received: u64,

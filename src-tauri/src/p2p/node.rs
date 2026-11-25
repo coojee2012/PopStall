@@ -12,6 +12,7 @@ use iroh_tickets::endpoint::EndpointTicket;
 
 use super::plaza::Plaza;
 use super::protocol::StallHandler;
+use super::talk::Talk;
 use super::traffic::Traffic;
 use crate::storage::load_or_create_secret_key;
 
@@ -61,6 +62,7 @@ pub struct Node {
     traffic: Arc<Traffic>,
     routes: Arc<RouteBook>,
     plaza: Option<Plaza>,
+    talk: Option<Talk>,
 }
 
 impl Node {
@@ -71,13 +73,16 @@ impl Node {
         let handler = StallHandler::new(traffic.clone(), routes.clone());
         let endpoint = bind_endpoint(secret_key).await?;
         let mut router = Router::builder(endpoint.clone()).accept(ALPN, handler.clone());
-        let plaza = if cfg!(test) {
-            None
+        let (plaza, talk) = if cfg!(test) {
+            (None, None)
         } else {
             let mdns = super::plaza::attach_mdns(&endpoint);
             let gossip = iroh_gossip::Gossip::builder().spawn(endpoint.clone());
             router = router.accept(iroh_gossip::ALPN, gossip.clone());
-            Some(super::plaza::start(endpoint.clone(), gossip, mdns))
+            let plaza = super::plaza::start(endpoint.clone(), gossip.clone(), mdns);
+            let talk = super::talk::start(endpoint.clone(), gossip, plaza.clone());
+            router = router.accept(super::talk::ALPN, talk.handler());
+            (Some(plaza), Some(talk))
         };
         let router = router.spawn();
         let locals: Vec<String> = endpoint
@@ -93,7 +98,22 @@ impl Node {
             traffic,
             routes,
             plaza,
+            talk,
         })
+    }
+
+    pub async fn talk_lines(&self) -> Vec<super::talk::TalkLineDto> {
+        match &self.talk {
+            Some(talk) => talk.lines().await,
+            None => Vec::new(),
+        }
+    }
+
+    pub async fn talk_say(&self, text: &str) -> Result<(), String> {
+        let Some(talk) = &self.talk else {
+            return Err("夜谈还没有接上".to_string());
+        };
+        talk.say(text).await
     }
 
     pub fn traffic(&self) -> Arc<Traffic> {

@@ -14,135 +14,173 @@
     --line: #e4d6c4;
     --ember: #c45c26;
     --pine: #2f6b4f;
-    --shadow: 0 18px 50px rgba(36, 25, 16, 0.08);
+    --shadow: 0 16px 40px rgba(36, 25, 16, 0.08);
     --serif: "Iowan Old Style", Palatino, "Songti SC", "Noto Serif SC", serif;
     --sans: "Avenir Next", "PingFang SC", "Hiragino Sans GB", sans-serif;
   }
-  body[data-theme="video"] {
+  body[data-theme="video"],
+  body[data-paper="night"] {
     color-scheme: dark;
     --ink: #f6efe4;
     --muted: #b7a898;
-    --paper: #16130f;
+    --paper: #14110e;
     --card: #221c16;
     --line: #3a3128;
-    --shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+    --shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; min-height: 100%; }
   body {
     background:
-      radial-gradient(900px 420px at 0% -10%, rgba(196, 92, 38, 0.16), transparent 55%),
-      radial-gradient(700px 380px at 100% 0%, rgba(47, 107, 79, 0.12), transparent 50%),
+      radial-gradient(880px 380px at 0% -12%, rgba(196, 92, 38, 0.14), transparent 55%),
       var(--paper);
     color: var(--ink);
     font-family: var(--sans);
   }
-  body[data-theme="video"] {
-    background:
-      radial-gradient(800px 360px at 20% -10%, rgba(196, 92, 38, 0.22), transparent 50%),
-      var(--paper);
-  }
-  header, main { width: min(1080px, calc(100% - 2.4rem)); margin: 0 auto; }
-  header { padding: 2.6rem 0 1.2rem; }
-  .mark {
-    margin: 0;
-    letter-spacing: 0.28em;
-    font-size: 0.72rem;
-    color: var(--ember);
-  }
+  header, main { width: min(1080px, calc(100% - 2rem)); margin: 0 auto; }
+  header { padding: 1.35rem 0 0.2rem; }
   h1 {
-    margin: 0.45rem 0 0;
+    margin: 0.2rem 0 0;
     font-family: var(--serif);
     font-weight: 500;
-    font-size: clamp(2.4rem, 5vw, 4.4rem);
+    font-size: clamp(1.8rem, 4vw, 2.7rem);
     letter-spacing: -0.03em;
   }
-  #lede { margin: 0.7rem 0 0; color: var(--muted); line-height: 1.7; }
-  main { padding-bottom: 4rem; }
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-    gap: 0.9rem;
+  #lede { margin: 0.35rem 0 0; color: var(--muted); line-height: 1.6; }
+  main { padding: 0.8rem 0 5rem; }
+  button, input { font: inherit; color: inherit; }
+  .find {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    margin: 0 0 0.85rem;
+    padding: 0.35rem 0 0.7rem;
+    background: color-mix(in srgb, var(--paper) 88%, transparent);
+    backdrop-filter: blur(10px);
   }
-  button.frame, .track, .chapter, .doc {
-    appearance: none;
+  .find input {
+    width: min(420px, 100%);
     border: 1px solid var(--line);
     background: var(--card);
-    color: inherit;
-    text-align: left;
-    cursor: pointer;
-    font: inherit;
+    border-radius: 999px;
+    padding: 0.55rem 0.95rem;
+    outline: none;
   }
-  button.frame {
+  .find input:focus { border-color: var(--ember); }
+  .find span { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 0.82rem; }
+  .photos {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+    gap: 0.4rem;
+  }
+  .photos button {
+    appearance: none;
+    aspect-ratio: 1;
     padding: 0;
-    border-radius: 1.1rem;
+    border: 0;
+    border-radius: 0.75rem;
     overflow: hidden;
+    background: color-mix(in srgb, var(--ink) 8%, var(--card));
+    cursor: pointer;
+  }
+  .photos img { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .now {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    margin-bottom: 0.8rem;
+    padding: 0.95rem 1rem 1rem;
+    border: 1px solid var(--line);
+    border-radius: 1.2rem;
+    background: color-mix(in srgb, var(--card) 92%, transparent);
+    backdrop-filter: blur(12px);
     box-shadow: var(--shadow);
   }
-  button.frame img { display: block; width: 100%; height: 220px; object-fit: cover; }
-  button.frame span, .track b, .chapter b, .doc b {
-    display: block;
-    padding: 0.75rem 0.85rem 0.9rem;
+  .now-top { display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem; }
+  .kicker { margin: 0; color: var(--ember); font-size: 0.75rem; letter-spacing: 0.08em; }
+  #track-title {
+    margin: 0.15rem 0 0;
     font-family: var(--serif);
+    font-size: clamp(1.35rem, 3vw, 1.9rem);
     font-weight: 500;
   }
-  .player {
-    display: grid;
-    grid-template-columns: minmax(0, 280px) minmax(0, 1fr);
-    gap: 1.2rem;
-    align-items: center;
+  #track-sub { margin: 0.25rem 0 0; min-height: 1.2em; color: var(--muted); font-size: 0.85rem; }
+  .transport { display: flex; gap: 0.45rem; }
+  .transport button, .tools button, #lightbox button {
+    border: 1px solid var(--line);
+    background: var(--card);
+    border-radius: 999px;
+    padding: 0.4rem 0.85rem;
+    cursor: pointer;
   }
-  .disc {
-    width: min(280px, 70vw);
-    aspect-ratio: 1;
-    margin: 0 auto;
-    border-radius: 50%;
-    background:
-      radial-gradient(circle at 50% 50%, var(--card) 0 18%, transparent 19% 22%, #1b140f 23% 100%);
-    box-shadow: var(--shadow);
-    display: grid;
-    place-items: center;
-    position: relative;
-  }
-  .disc::after {
-    content: "";
-    width: 18%;
-    aspect-ratio: 1;
-    border-radius: 50%;
-    background: var(--ember);
-  }
-  .disc.spin { animation: spin 8s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  #now { margin: 0 0 0.85rem; color: var(--muted); min-height: 1.4em; }
-  audio, video { width: 100%; }
+  audio, video { width: 100%; margin-top: 0.75rem; }
   video {
+    display: block;
+    margin-top: 0;
     background: #000;
-    border-radius: 1.1rem;
-    box-shadow: var(--shadow);
+    border-radius: 1rem;
     max-height: 68vh;
   }
-  .list { display: flex; flex-direction: column; gap: 0.45rem; margin-top: 1rem; }
-  .track, .chapter, .doc { border-radius: 0.95rem; padding: 0.15rem 0.2rem; }
-  .track[aria-current="true"], .chapter[aria-current="true"], .doc[aria-current="true"] {
+  .screen {
+    position: relative;
+    border-radius: 1rem;
+    overflow: hidden;
+    background: #0c0a08;
+    min-height: 220px;
+  }
+  .screen-empty {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    margin: 0;
+    color: #d9cbbd;
+    pointer-events: none;
+  }
+  .list { display: flex; flex-direction: column; gap: 0.3rem; }
+  .row {
+    appearance: none;
+    display: grid;
+    grid-template-columns: 2.4rem minmax(0, 1fr) auto;
+    gap: 0.65rem;
+    align-items: center;
+    width: 100%;
+    text-align: left;
+    border: 1px solid transparent;
+    background: transparent;
+    border-radius: 0.85rem;
+    padding: 0.55rem 0.7rem;
+    cursor: pointer;
+  }
+  .row.chapter { grid-template-columns: minmax(0, 1fr); }
+  .row:hover { background: color-mix(in srgb, var(--ember) 8%, var(--card)); }
+  .row[aria-current="true"] {
     border-color: var(--ember);
     background: color-mix(in srgb, var(--ember) 12%, var(--card));
   }
+  .idx, .size { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 0.8rem; }
+  .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .reader {
     display: grid;
-    grid-template-columns: 220px minmax(0, 1fr);
-    gap: 1.4rem;
+    grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+    gap: 1.2rem;
+    align-items: start;
   }
   article {
+    max-width: 68ch;
     background: var(--card);
     border: 1px solid var(--line);
-    border-radius: 1.3rem;
-    padding: clamp(1.2rem, 3vw, 2.6rem);
+    border-radius: 1.2rem;
+    padding: clamp(1.1rem, 3vw, 2.2rem);
     box-shadow: var(--shadow);
     font-family: var(--serif);
     font-size: var(--read, 1.12rem);
-    line-height: 1.9;
+    line-height: 1.95;
   }
-  article h2, article h3 { font-weight: 500; line-height: 1.3; }
+  article h2, article h3 { font-weight: 500; line-height: 1.35; }
   article pre {
     overflow: auto;
     padding: 0.8rem 1rem;
@@ -152,39 +190,31 @@
     font-size: 0.86em;
     line-height: 1.5;
   }
-  .tools { display: flex; gap: 0.5rem; margin: 0.2rem 0 0.8rem; }
-  .tools button, #lightbox button {
-    border: 1px solid var(--line);
-    background: var(--card);
-    color: inherit;
-    border-radius: 999px;
-    padding: 0.35rem 0.8rem;
-    font: inherit;
-    cursor: pointer;
-  }
-  iframe, embed { width: 100%; height: 78vh; border: 0; border-radius: 1.1rem; background: white; }
+  .tools { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0 0 0.8rem; }
+  iframe, embed { width: 100%; height: 78vh; border: 0; border-radius: 1rem; background: white; }
   #lightbox[hidden] { display: none; }
   #lightbox {
     position: fixed;
     inset: 0;
-    background: rgba(20, 14, 10, 0.88);
+    z-index: 5;
+    background: rgba(12, 9, 7, 0.92);
     display: grid;
     grid-template-rows: auto 1fr auto;
-    padding: 1rem;
+    padding: 0.8rem 1rem 1rem;
     color: #f6efe4;
   }
-  #lightbox img { max-width: min(1100px, 100%); max-height: 74vh; margin: auto; object-fit: contain; }
-  #lightbox header { width: min(1100px, 100%); display: flex; justify-content: space-between; align-items: center; }
-  .nav { display: flex; justify-content: space-between; width: min(1100px, 100%); margin: 0 auto; }
-  .empty { color: var(--muted); padding: 2rem 0; }
+  #lightbox img { max-width: min(1200px, 100%); max-height: 100%; margin: auto; object-fit: contain; cursor: pointer; }
+  #lightbox header, .nav { width: min(1200px, 100%); margin: 0 auto; display: flex; justify-content: space-between; align-items: center; gap: 0.6rem; }
+  #light-title { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .empty { color: var(--muted); padding: 1.5rem 0; }
   @media (max-width: 800px) {
-    .player, .reader { grid-template-columns: 1fr; }
+    .reader, .now-top { grid-template-columns: 1fr; display: grid; }
+    .photos { grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); }
   }
 </style>
 </head>
 <body data-theme="{{THEME}}">
 <header>
-  <p class="mark">闪摊</p>
   <h1 id="title">{{TITLE}}</h1>
   <p id="lede"></p>
 </header>
@@ -197,6 +227,7 @@
   <img id="light-img" alt="">
   <div class="nav">
     <button id="light-prev" type="button">上一张</button>
+    <span id="light-count"></span>
     <button id="light-next" type="button">下一张</button>
   </div>
 </div>
@@ -204,19 +235,30 @@
 const theme = document.body.dataset.theme;
 const stage = document.getElementById("stage");
 const lede = document.getElementById("lede");
-const copy = {
-  image: "只展出这个文件夹里的图片。",
-  music: "选一首再播放。不会自动出声。",
-  video: "宽幕播放。进度可以拖动。",
-  novel: "按章节阅读。字号和纸色记在这台浏览器里。",
-  document: "在这里翻开 PDF。"
+const hints = {
+  image: "点开看大图，左右键换一张。",
+  music: "点一首就开始，播完自动下一首。",
+  video: "点一集再播，不会自己开始。",
+  novel: "从左边选章节。字号和纸色会记住。",
+  document: "选一份再打开。"
 };
-lede.textContent = copy[theme] || "";
+const caps = { image: 360, music: 400, video: 200, novel: 400, document: 200 };
 
 function esc(value) {
   return String(value).replace(/[&<>"']/g, (ch) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
   })[ch]);
+}
+
+function formatSize(bytes) {
+  const size = Number(bytes) || 0;
+  if (size < 1024) return size + " B";
+  if (size < 1048576) return Math.max(1, Math.round(size / 1024)) + " KB";
+  if (size < 1073741824) {
+    const mb = size / 1048576;
+    return (mb >= 10 ? Math.round(mb) : mb.toFixed(1)) + " MB";
+  }
+  return (size / 1073741824).toFixed(1) + " GB";
 }
 
 async function main() {
@@ -230,15 +272,58 @@ async function main() {
     return;
   }
   const items = catalog.items || [];
+  const unit = { image: "张", music: "首", video: "个", novel: "篇", document: "份" }[theme] || "个";
+  lede.textContent = items.length ? (items.length + " " + unit + " · " + (hints[theme] || "")) : "这个主题里还没有可以展示的文件。";
   if (!items.length) {
     stage.innerHTML = '<p class="empty">这个主题里还没有可以展示的文件。</p>';
     return;
   }
-  if (theme === "image") renderImages(items);
-  else if (theme === "music") renderMusic(items);
-  else if (theme === "video") renderVideo(items);
-  else if (theme === "novel") renderNovel(items);
-  else renderDocs(items);
+  const host = document.createElement("div");
+  stage.append(host);
+  const note = document.createElement("p");
+  note.className = "empty";
+  const persistent = theme === "music" ? renderMusic(host, items) : theme === "video" ? renderVideo(host, items) : null;
+  const paint = (shown, hiddenNote) => {
+    if (persistent) persistent(shown);
+    else {
+      host.replaceChildren();
+      if (theme === "image") renderImages(host, shown);
+      else if (theme === "novel") renderNovel(host, catalog.title || "", shown);
+      else renderDocs(host, shown);
+    }
+    note.remove();
+    if (hiddenNote) {
+      note.textContent = hiddenNote;
+      host.append(note);
+    }
+  };
+  let query = "";
+  const apply = () => {
+    const matched = query ? items.filter((item) => String(item.title).toLowerCase().includes(query)) : items;
+    const cap = caps[theme] || 400;
+    const shown = matched.slice(0, cap);
+    const hidden = matched.length - shown.length;
+    paint(shown, hidden > 0 ? "先列出 " + shown.length + " 个。用搜索把范围缩小。" : "");
+    return matched.length;
+  };
+  if (items.length >= 8) {
+    const bar = document.createElement("label");
+    bar.className = "find";
+    const input = document.createElement("input");
+    input.type = "search";
+    input.placeholder = "找文件名";
+    input.autocomplete = "off";
+    input.setAttribute("aria-label", "找文件名");
+    const meta = document.createElement("span");
+    bar.append(input, meta);
+    stage.insertBefore(bar, host);
+    input.addEventListener("input", () => {
+      query = input.value.trim().toLowerCase();
+      meta.textContent = apply() + " / " + items.length;
+    });
+    meta.textContent = items.length + " 个";
+  }
+  apply();
   if (catalog.truncated) {
     const note = document.createElement("p");
     note.className = "empty";
@@ -247,18 +332,23 @@ async function main() {
   }
 }
 
-function renderImages(items) {
+function renderImages(host, items) {
   const grid = document.createElement("div");
-  grid.className = "grid";
+  grid.className = "photos";
   items.forEach((item, index) => {
     const button = document.createElement("button");
-    button.className = "frame";
     button.type = "button";
-    button.innerHTML = '<img alt="" src="' + esc(item.path) + '"><span>' + esc(item.title) + "</span>";
+    button.title = item.title;
+    const img = document.createElement("img");
+    img.alt = item.title;
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.src = item.path;
+    button.append(img);
     button.addEventListener("click", () => openLight(items, index));
     grid.append(button);
   });
-  stage.append(grid);
+  host.append(grid);
 }
 
 let lightIndex = 0;
@@ -271,127 +361,202 @@ function openLight(items, index) {
 }
 function paintLight() {
   const item = lightItems[lightIndex];
-  document.getElementById("light-img").src = item.path;
-  document.getElementById("light-img").alt = item.title;
-  document.getElementById("light-title").textContent = item.title;
+  const img = document.getElementById("light-img");
+  img.src = item.path;
+  img.alt = item.title;
+  document.getElementById("light-title").textContent = item.title + " · " + formatSize(item.size);
+  document.getElementById("light-count").textContent = (lightIndex + 1) + " / " + lightItems.length;
 }
 document.getElementById("light-close").onclick = () => { document.getElementById("lightbox").hidden = true; };
-document.getElementById("light-prev").onclick = () => { lightIndex = (lightIndex - 1 + lightItems.length) % lightItems.length; paintLight(); };
-document.getElementById("light-next").onclick = () => { lightIndex = (lightIndex + 1) % lightItems.length; paintLight(); };
+document.getElementById("light-prev").onclick = () => stepLight(-1);
+document.getElementById("light-next").onclick = () => stepLight(1);
+document.getElementById("light-img").onclick = () => stepLight(1);
+function stepLight(delta) {
+  if (!lightItems.length) return;
+  lightIndex = (lightIndex + delta + lightItems.length) % lightItems.length;
+  paintLight();
+}
 document.addEventListener("keydown", (event) => {
   const box = document.getElementById("lightbox");
   if (box.hidden) return;
   if (event.key === "Escape") box.hidden = true;
-  if (event.key === "ArrowLeft") document.getElementById("light-prev").click();
-  if (event.key === "ArrowRight") document.getElementById("light-next").click();
+  if (event.key === "ArrowLeft") stepLight(-1);
+  if (event.key === "ArrowRight") stepLight(1);
 });
 
-function renderMusic(items) {
-  const wrap = document.createElement("div");
-  wrap.className = "player";
-  const disc = document.createElement("div");
-  disc.className = "disc";
-  const side = document.createElement("div");
+function renderMusic(host, all) {
+  const now = document.createElement("div");
+  now.className = "now";
+  now.innerHTML = '<div class="now-top"><div><p class="kicker" id="kicker">准备好了</p><h2 id="track-title">选一首</h2><p id="track-sub">不会自动出声。</p></div><div class="transport"><button type="button" id="prev">上一首</button><button type="button" id="next">下一首</button></div></div>';
   const audio = document.createElement("audio");
   audio.controls = true;
-  audio.preload = "auto";
-  const now = document.createElement("p");
-  now.id = "now";
-  now.textContent = "还没有选择曲目";
+  audio.preload = "none";
+  now.append(audio);
+  if (all.length >= 8) now.style.top = "3.2rem";
   const list = document.createElement("div");
   list.className = "list";
+  host.append(now, list);
+  let cursor = -1;
+
+  const sub = () => document.getElementById("track-sub");
   const showBuffer = () => {
-    const title = now.dataset.title || "";
+    const title = audio.dataset.title || "";
     if (!audio.buffered.length || !isFinite(audio.duration) || audio.duration <= 0) {
-      now.textContent = title ? "正在缓冲 " + title : "还没有选择曲目";
+      sub().textContent = title ? "正在打开 " + title : "不会自动出声。";
       return;
     }
     if (!audio.paused && audio.readyState >= 3) {
-      now.textContent = title;
+      sub().textContent = formatSize(all[cursor] && all[cursor].size);
       return;
     }
     const end = audio.buffered.end(audio.buffered.length - 1);
-    now.textContent = "正在缓冲 " + Math.min(99, Math.round(end / audio.duration * 100)) + "%";
+    sub().textContent = "正在缓冲 " + Math.min(99, Math.round(end / audio.duration * 100)) + "%";
   };
   audio.addEventListener("waiting", showBuffer);
   audio.addEventListener("progress", showBuffer);
-  audio.addEventListener("playing", () => { now.textContent = now.dataset.title || ""; });
-  items.forEach((item) => {
-    const button = document.createElement("button");
-    button.className = "track";
-    button.type = "button";
-    button.innerHTML = "<b>" + esc(item.title) + "</b>";
-    button.addEventListener("click", () => {
-      list.querySelectorAll(".track").forEach((node) => node.removeAttribute("aria-current"));
-      button.setAttribute("aria-current", "true");
-      now.dataset.title = item.title;
-      now.textContent = "正在缓冲 " + item.title;
-      audio.src = item.path;
-      const play = audio.play();
-      if (play && play.catch) play.catch(() => {});
-    });
-    list.append(button);
+  audio.addEventListener("playing", () => {
+    document.getElementById("kicker").textContent = "正在听";
+    sub().textContent = formatSize(all[cursor] && all[cursor].size);
   });
-  audio.addEventListener("play", () => disc.classList.add("spin"));
-  audio.addEventListener("pause", () => disc.classList.remove("spin"));
-  audio.addEventListener("ended", () => disc.classList.remove("spin"));
-  side.append(now, audio, list);
-  wrap.append(disc, side);
-  stage.append(wrap);
+  audio.addEventListener("pause", () => {
+    if (audio.ended || cursor < 0) return;
+    document.getElementById("kicker").textContent = "已暂停";
+  });
+
+  function mark() {
+    const current = all[cursor];
+    list.querySelectorAll(".row").forEach((node) => {
+      if (current && node.dataset.path === current.path) node.setAttribute("aria-current", "true");
+      else node.removeAttribute("aria-current");
+    });
+  }
+  function playAt(index) {
+    if (index < 0 || index >= all.length) return;
+    cursor = index;
+    const item = all[index];
+    document.getElementById("kicker").textContent = "正在打开";
+    document.getElementById("track-title").textContent = item.title;
+    sub().textContent = "正在打开 " + formatSize(item.size);
+    audio.dataset.title = item.title;
+    audio.src = item.path;
+    mark();
+    const play = audio.play();
+    if (play && play.catch) play.catch(() => {});
+  }
+  now.querySelector("#prev").onclick = () => playAt(cursor < 0 ? 0 : cursor - 1);
+  now.querySelector("#next").onclick = () => playAt(cursor < 0 ? 0 : cursor + 1);
+  audio.addEventListener("ended", () => {
+    if (cursor + 1 < all.length) playAt(cursor + 1);
+    else document.getElementById("kicker").textContent = "最后一首听完了";
+  });
+  document.addEventListener("keydown", (event) => {
+    if (typing(event) || !document.getElementById("lightbox").hidden) return;
+    if (event.key === " " && cursor >= 0) {
+      event.preventDefault();
+      if (audio.paused) audio.play();
+      else audio.pause();
+    }
+    if (event.key === "ArrowDown") { event.preventDefault(); playAt(cursor + 1); }
+    if (event.key === "ArrowUp") { event.preventDefault(); playAt(cursor - 1); }
+  });
+  return (shown) => {
+    list.replaceChildren();
+    shown.forEach((item) => {
+      const index = all.indexOf(item);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "row";
+      button.dataset.path = item.path;
+      button.innerHTML = '<span class="idx">' + String(index + 1).padStart(2, "0") + '</span><span class="name"></span><span class="size"></span>';
+      button.querySelector(".name").textContent = item.title;
+      button.querySelector(".size").textContent = formatSize(item.size);
+      button.addEventListener("click", () => playAt(index));
+      list.append(button);
+    });
+    mark();
+  };
 }
 
-function renderVideo(items) {
-  const now = document.createElement("p");
-  now.id = "now";
+function renderVideo(host, all) {
+  const screen = document.createElement("div");
+  screen.className = "screen";
   const video = document.createElement("video");
   video.controls = true;
   video.playsInline = true;
-  video.preload = "auto";
+  video.preload = "none";
+  const empty = document.createElement("p");
+  empty.className = "screen-empty";
+  empty.textContent = "点下面一集再播";
+  screen.append(video, empty);
+  const transport = document.createElement("div");
+  transport.className = "transport";
+  transport.style.margin = "0.7rem 0";
+  transport.innerHTML = '<button type="button" id="prev">上一集</button><button type="button" id="next">下一集</button>';
+  const title = document.createElement("p");
+  title.id = "track-sub";
   const list = document.createElement("div");
   list.className = "list";
-  const label = () => now.dataset.title || "";
-  video.addEventListener("waiting", () => {
-    now.textContent = "正在缓冲 " + label();
-  });
+  host.append(screen, transport, title, list);
+  let cursor = -1;
+  function mark() {
+    const current = all[cursor];
+    list.querySelectorAll(".row").forEach((node) => {
+      if (current && node.dataset.path === current.path) node.setAttribute("aria-current", "true");
+      else node.removeAttribute("aria-current");
+    });
+  }
+  function playAt(index) {
+    if (index < 0 || index >= all.length) return;
+    cursor = index;
+    const item = all[index];
+    empty.hidden = true;
+    title.textContent = "正在打开 " + item.title;
+    video.src = item.path;
+    mark();
+    const play = video.play();
+    if (play && play.catch) play.catch(() => {});
+  }
   video.addEventListener("playing", () => {
-    now.textContent = label();
+    const item = all[cursor];
+    title.textContent = item ? item.title + " · " + formatSize(item.size) : "";
+  });
+  video.addEventListener("waiting", () => {
+    const item = all[cursor];
+    if (item) title.textContent = "正在缓冲 " + item.title;
   });
   video.addEventListener("progress", () => {
-    if (video.readyState >= 3 || !video.buffered.length) return;
-    const duration = video.duration;
-    if (!isFinite(duration) || duration <= 0) return;
+    if (video.readyState >= 3 || !video.buffered.length || cursor < 0) return;
+    if (!isFinite(video.duration) || video.duration <= 0) return;
     const end = video.buffered.end(video.buffered.length - 1);
-    now.textContent = "正在缓冲 " + Math.min(99, Math.round(end / duration * 100)) + "%";
+    title.textContent = "正在缓冲 " + Math.min(99, Math.round(end / video.duration * 100)) + "%";
   });
-  items.forEach((item, index) => {
-    const button = document.createElement("button");
-    button.className = "track";
-    button.type = "button";
-    button.innerHTML = "<b>" + esc(item.title) + "</b>";
-    button.addEventListener("click", () => {
-      list.querySelectorAll(".track").forEach((node) => node.removeAttribute("aria-current"));
-      button.setAttribute("aria-current", "true");
-      now.dataset.title = item.title;
-      now.textContent = "正在缓冲 " + item.title;
-      video.src = item.path;
-      const play = video.play();
-      if (play && play.catch) play.catch(() => {});
+  video.addEventListener("ended", () => {
+    if (cursor + 1 < all.length) playAt(cursor + 1);
+  });
+  transport.querySelector("#prev").onclick = () => playAt(cursor < 0 ? 0 : cursor - 1);
+  transport.querySelector("#next").onclick = () => playAt(cursor < 0 ? 0 : cursor + 1);
+  return (shown) => {
+    list.replaceChildren();
+    shown.forEach((item) => {
+      const index = all.indexOf(item);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "row";
+      button.dataset.path = item.path;
+      button.innerHTML = '<span class="idx">' + String(index + 1).padStart(2, "0") + '</span><span class="name"></span><span class="size"></span>';
+      button.querySelector(".name").textContent = item.title;
+      button.querySelector(".size").textContent = formatSize(item.size);
+      button.addEventListener("click", () => playAt(index));
+      list.append(button);
     });
-    list.append(button);
-    if (index === 0) {
-      button.setAttribute("aria-current", "true");
-      now.dataset.title = item.title;
-      now.textContent = item.title;
-      video.src = item.path;
-    }
-  });
-  stage.append(now, video, list);
+    mark();
+  };
 }
 
-function renderNovel(items) {
+function renderNovel(host, stallTitle, items) {
   const saved = Number(localStorage.getItem("popstall-read-size") || "18");
   document.documentElement.style.setProperty("--read", saved + "px");
-  if (localStorage.getItem("popstall-paper") === "night") document.body.dataset.theme = "video";
+  if (localStorage.getItem("popstall-paper") === "night") document.body.dataset.paper = "night";
   const tools = document.createElement("div");
   tools.className = "tools";
   tools.innerHTML = '<button type="button" id="smaller">小一点</button><button type="button" id="larger">大一点</button><button type="button" id="paper">换纸色</button>';
@@ -401,22 +566,31 @@ function renderNovel(items) {
   list.className = "list";
   const article = document.createElement("article");
   article.textContent = "选一个章节。";
-  items.forEach((item, index) => {
+  const memoryKey = "popstall-chapter:" + stallTitle;
+  const remembered = localStorage.getItem(memoryKey);
+  let opened = false;
+  items.forEach((item) => {
     const button = document.createElement("button");
-    button.className = "chapter";
+    button.className = "row chapter";
     button.type = "button";
-    button.innerHTML = "<b>" + esc(item.title) + "</b>";
-    button.addEventListener("click", () => openChapter(item, button, article, list));
+    button.innerHTML = '<span class="name"></span>';
+    button.querySelector(".name").textContent = item.title;
+    button.addEventListener("click", () => openChapter(item, button, article, list, memoryKey));
     list.append(button);
-    if (index === 0) button.click();
+    if (!opened && (!remembered || remembered === item.path)) {
+      opened = true;
+      button.click();
+    }
   });
+  if (!opened && list.firstChild) list.firstChild.click();
   wrap.append(list, article);
-  stage.append(tools, wrap);
+  host.append(tools, wrap);
   document.getElementById("smaller").onclick = () => resize(-1);
   document.getElementById("larger").onclick = () => resize(1);
   document.getElementById("paper").onclick = () => {
-    const night = document.body.dataset.theme !== "video";
-    document.body.dataset.theme = night ? "video" : "novel";
+    const night = document.body.dataset.paper !== "night";
+    if (night) document.body.dataset.paper = "night";
+    else delete document.body.dataset.paper;
     localStorage.setItem("popstall-paper", night ? "night" : "day");
   };
 }
@@ -428,13 +602,16 @@ function resize(delta) {
   localStorage.setItem("popstall-read-size", String(next));
 }
 
-async function openChapter(item, button, article, list) {
-  list.querySelectorAll(".chapter").forEach((node) => node.removeAttribute("aria-current"));
+async function openChapter(item, button, article, list, memoryKey) {
+  list.querySelectorAll(".row").forEach((node) => node.removeAttribute("aria-current"));
   button.setAttribute("aria-current", "true");
+  localStorage.setItem(memoryKey, item.path);
+  article.style.whiteSpace = "normal";
   article.textContent = "正在翻开…";
   const response = await fetch(item.path);
   const text = await response.text();
   if (item.path.toLowerCase().endsWith(".txt")) {
+    article.style.whiteSpace = "pre-wrap";
     article.textContent = text;
     return;
   }
@@ -485,27 +662,37 @@ function inline(value) {
     .replace(/\[([^\]]+)\]\((\/[^)\s]*)\)/g, '<a href="$2">$1</a>');
 }
 
-function renderDocs(items) {
+function renderDocs(host, items) {
   const list = document.createElement("div");
   list.className = "list";
   const frame = document.createElement("iframe");
-  frame.title = items[0].title;
-  frame.src = items[0].path;
+  frame.hidden = true;
+  function openDoc(item, button) {
+    frame.hidden = false;
+    frame.title = item.title;
+    frame.src = item.path;
+    list.querySelectorAll(".row").forEach((node) => node.removeAttribute("aria-current"));
+    button.setAttribute("aria-current", "true");
+  }
   items.forEach((item, index) => {
     const button = document.createElement("button");
-    button.className = "doc";
+    button.className = "row";
     button.type = "button";
-    if (index === 0) button.setAttribute("aria-current", "true");
-    button.innerHTML = "<b>" + esc(item.title) + "</b>";
-    button.addEventListener("click", () => {
-      frame.src = item.path;
-      frame.title = item.title;
-      list.querySelectorAll(".doc").forEach((node) => node.removeAttribute("aria-current"));
-      button.setAttribute("aria-current", "true");
-    });
+    button.innerHTML = '<span class="idx">' + String(index + 1).padStart(2, "0") + '</span><span class="name"></span><span class="size"></span>';
+    button.querySelector(".name").textContent = item.title;
+    button.querySelector(".size").textContent = formatSize(item.size);
+    button.addEventListener("click", () => openDoc(item, button));
     list.append(button);
+    if (items.length === 1) openDoc(item, button);
   });
-  stage.append(list, frame);
+  host.append(list, frame);
+}
+
+function typing(event) {
+  const target = event.target;
+  if (!target || !target.tagName) return false;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
 }
 
 main();

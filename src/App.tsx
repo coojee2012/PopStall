@@ -1,5 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { Footprints, Search, Star, Store, Ticket, X } from "lucide-react";
+import { Footprints, MessageCircle, Search, Star, Store, Ticket, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useKept } from "./lib/memory";
 import { PlazaView } from "./components/directory/PlazaView";
@@ -9,12 +9,14 @@ import { MyStallCard } from "./components/studio/MyStallCard";
 import { RouteBanner } from "./components/studio/RouteBanner";
 import { StageView } from "./components/studio/StageView";
 import { TrafficMeter } from "./components/studio/TrafficMeter";
+import { TalkRoom } from "./components/talk/TalkRoom";
 import { usePlazaStore, startPlaza } from "./stores/plaza";
 import { startRoute } from "./stores/route";
+import { startTalk, useTalkStore } from "./stores/talk";
 import { useSession } from "./stores/session";
 import { cn } from "./lib/utils";
 
-type Desk = "market" | "kept" | "trail" | "stall";
+type Desk = "market" | "kept" | "trail" | "talk" | "stall";
 
 export default function App() {
   const error = useSession((state) => state.error);
@@ -29,12 +31,13 @@ export default function App() {
 
   useEffect(() => startPlaza(), []);
   useEffect(() => startRoute(), []);
+  useEffect(() => startTalk(), []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const typing = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable;
-      if (event.key === "/" && !typing && !codeOpen && desk !== "stall") {
+      if (event.key === "/" && !typing && !codeOpen && desk !== "stall" && desk !== "talk") {
         event.preventDefault();
         searchRef.current?.focus();
       }
@@ -55,6 +58,8 @@ export default function App() {
         </div>
         {desk === "stall" ? (
           <p className="min-w-0 flex-1 truncate font-serif text-2xl text-muted">摆摊</p>
+        ) : desk === "talk" ? (
+          <p className="min-w-0 flex-1 truncate font-serif text-2xl text-muted">夜谈</p>
         ) : (
           <label className="relative mx-1 min-w-0 flex-1">
             <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted" />
@@ -124,6 +129,7 @@ export default function App() {
             <NavButton active={desk === "market"} icon={<Store className="size-4" />} label="广场" onClick={() => setDesk("market")} />
             <NavButton active={desk === "kept"} icon={<Star className="size-4" />} label="常去" count={<KeptBadge />} onClick={() => setDesk("kept")} />
             <NavButton active={desk === "trail"} icon={<Footprints className="size-4" />} label="足迹" count={<TrailBadge />} onClick={() => setDesk("trail")} />
+            <NavButton active={desk === "talk"} icon={<MessageCircle className="size-4" />} label="夜谈" count={<TalkBadge active={desk === "talk"} />} onClick={() => setDesk("talk")} />
           </nav>
           <div className="mt-auto flex flex-col gap-3 px-3 pt-4 pb-4">
             <MyStallCard active={desk === "stall"} onOpen={() => setDesk("stall")} />
@@ -143,6 +149,8 @@ export default function App() {
               <HostPanel />
             </div>
           </div>
+        ) : desk === "talk" ? (
+          <TalkRoom />
         ) : (
           <PlazaView desk={desk} query={query} />
         )}
@@ -217,4 +225,16 @@ function TrailBadge() {
     return null;
   }
   return <span className="font-mono text-xs text-muted tabular-nums">{count}</span>;
+}
+
+function TalkBadge({ active }: { active: boolean }) {
+  const count = useTalkStore((state) => state.lines.length);
+  const seen = useRef(0);
+  if (active) {
+    seen.current = count;
+  }
+  if (active || count <= seen.current) {
+    return null;
+  }
+  return <span className="size-1.5 rounded-full bg-ember" />;
 }

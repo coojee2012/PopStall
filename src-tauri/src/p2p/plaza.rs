@@ -68,6 +68,7 @@ impl Default for PlazaSnapshot {
     }
 }
 
+#[derive(Clone)]
 pub struct Plaza {
     announce: watch::Sender<Announce>,
     stalls: Arc<Mutex<HashMap<EndpointId, LiveStall>>>,
@@ -86,6 +87,12 @@ impl Plaza {
 
     pub fn retract(&self) {
         let _ = self.announce.send(Announce::Idle);
+    }
+
+    pub async fn peer_ids(&self, limit: usize) -> Vec<EndpointId> {
+        let mut ids: Vec<EndpointId> = self.stalls.lock().await.keys().copied().collect();
+        ids.truncate(limit);
+        ids
     }
 
     pub async fn snapshot(&self, self_id: EndpointId) -> PlazaSnapshot {

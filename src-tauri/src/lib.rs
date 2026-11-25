@@ -43,6 +43,8 @@ pub fn run() {
             commands::open_preview,
             commands::open_guest,
             commands::list_plaza,
+            commands::talk_snapshot,
+            commands::talk_send,
             commands::traffic,
             commands::route_status,
             commands::open_discovered,

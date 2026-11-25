@@ -5,6 +5,7 @@ mod io;
 mod node;
 mod plaza;
 mod protocol;
+pub(crate) mod talk;
 mod traffic;
 
 pub use frame::{Method, RequestFrame, encode_request};

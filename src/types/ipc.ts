@@ -50,3 +50,14 @@ export type TrafficSnapshot = {
 export type RouteStatus = {
   relayOnly: boolean;
 };
+
+export type TalkLine = {
+  id: string;
+  senderId: string;
+  text: string;
+  mine: boolean;
+};
+
+export type TalkSnapshot = {
+  lines: TalkLine[];
+};
