@@ -104,6 +104,7 @@ pub struct HelperStatus {
     pub via_helper: bool,
     pub capable: bool,
     pub reach_note: String,
+    pub netdebug_path: String,
 }
 
 #[derive(Clone, Debug)]
@@ -208,6 +209,7 @@ impl HelperHub {
             via_helper,
             capable,
             reach_note,
+            netdebug_path: crate::netdebug::path_string(),
         }
     }
 
@@ -377,14 +379,25 @@ impl HelperHandler {
         let _ = self.invite_tx.try_send(invite.clone());
         tokio::spawn(notify_host_via_alpn(self.endpoint.clone(), invite));
 
+        crate::netdebug::log(format!(
+            "rendezvous_wait guest={guest_id} target={target} session={session:02x?} timeout_ms={}",
+            RENDEZVOUS_WAIT.as_millis()
+        ));
         let host = match tokio::time::timeout(RENDEZVOUS_WAIT, host_rx).await {
             Ok(Ok(host)) => {
                 tracing::info!(guest = %guest_id, %target, "互助汇合成功（摊主回连）");
+                crate::netdebug::log(format!(
+                    "rendezvous_ok guest={guest_id} target={target} host_paths={}",
+                    describe_conn_paths(&host)
+                ));
                 host
             }
             _ => {
                 self.rendezvous.cancel(session).await;
                 tracing::info!(%target, "摊主未及时回连，改由帮手拨摊主");
+                crate::netdebug::log(format!(
+                    "rendezvous_fallback guest={guest_id} target={target} reason=host_no_callback"
+                ));
                 match tokio::time::timeout(
                     HOST_DIAL,
                     self.endpoint
@@ -392,13 +405,25 @@ impl HelperHandler {
                 )
                 .await
                 {
-                    Ok(Ok(host)) => host,
+                    Ok(Ok(host)) => {
+                        crate::netdebug::log(format!(
+                            "fallback_host_ok target={target} paths={}",
+                            describe_conn_paths(&host)
+                        ));
+                        host
+                    }
                     Ok(Err(err)) => {
                         tracing::info!(%target, ?err, "helper could not reach host");
+                        crate::netdebug::log(format!(
+                            "fallback_host_err target={target} err={err:?}"
+                        ));
                         let _ = write_hello_status(&mut send, 3).await;
                         return Ok(());
                     }
                     Err(_) => {
+                        crate::netdebug::log(format!(
+                            "fallback_host_timeout target={target}"
+                        ));
                         let _ = write_hello_status(&mut send, 4).await;
                         return Ok(());
                     }
@@ -758,9 +783,18 @@ pub async fn probe_offers(
     exclude: Option<EndpointId>,
 ) -> Vec<HelperOffer> {
     let raw = book.list(self_id).await;
+    let local = format_endpoint_addr(&endpoint.addr());
+    crate::netdebug::log(format!(
+        "probe_start self={} local={} offers={} exclude={:?}",
+        self_id,
+        local,
+        raw.len(),
+        exclude.map(|id| id.to_string())
+    ));
     let mut out = Vec::new();
     for (id, live) in raw {
         if exclude == Some(id) {
+            crate::netdebug::log(format!("probe_skip helper={id} reason=current_host"));
             out.push(HelperOffer {
                 endpoint_id: id.to_string(),
                 limit_bps: live.limit_bps,
@@ -774,12 +808,26 @@ pub async fn probe_offers(
         }
         let started = Instant::now();
         let dial = helper_endpoint_addr(id, &live.addrs);
+        crate::netdebug::log(format!(
+            "probe_dial helper={id} card_addrs={:?} dial={}",
+            live.addrs,
+            format_endpoint_addr(&dial)
+        ));
         match tokio::time::timeout(Duration::from_secs(8), endpoint.connect(dial, ALPN)).await
         {
             Ok(Ok(connection)) => {
+                crate::netdebug::log(format!(
+                    "probe_connected helper={id} elapsed_ms={} paths={}",
+                    started.elapsed().as_millis(),
+                    describe_conn_paths(&connection)
+                ));
                 // Hole punch often finishes after the first relay path; wait before judging.
                 let direct = wait_until_direct(&connection, PATH_WAIT).await;
                 let rtt_ms = started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+                crate::netdebug::log(format!(
+                    "probe_result helper={id} direct={direct} rtt_ms={rtt_ms} paths={}",
+                    describe_conn_paths(&connection)
+                ));
                 connection.close(0u8.into(), b"probe");
                 out.push(HelperOffer {
                     endpoint_id: id.to_string(),
@@ -797,24 +845,36 @@ pub async fn probe_offers(
                     },
                 });
             }
-            Ok(Err(_)) => out.push(HelperOffer {
-                endpoint_id: id.to_string(),
-                limit_bps: live.limit_bps,
-                load: live.load,
-                rtt_ms: None,
-                direct: false,
-                usable: false,
-                note: "连不上".to_string(),
-            }),
-            Err(_) => out.push(HelperOffer {
-                endpoint_id: id.to_string(),
-                limit_bps: live.limit_bps,
-                load: live.load,
-                rtt_ms: None,
-                direct: false,
-                usable: false,
-                note: "探测超时".to_string(),
-            }),
+            Ok(Err(err)) => {
+                crate::netdebug::log(format!(
+                    "probe_connect_err helper={id} err={err:?} elapsed_ms={}",
+                    started.elapsed().as_millis()
+                ));
+                out.push(HelperOffer {
+                    endpoint_id: id.to_string(),
+                    limit_bps: live.limit_bps,
+                    load: live.load,
+                    rtt_ms: None,
+                    direct: false,
+                    usable: false,
+                    note: "连不上".to_string(),
+                });
+            }
+            Err(_) => {
+                crate::netdebug::log(format!(
+                    "probe_timeout helper={id} elapsed_ms={}",
+                    started.elapsed().as_millis()
+                ));
+                out.push(HelperOffer {
+                    endpoint_id: id.to_string(),
+                    limit_bps: live.limit_bps,
+                    load: live.load,
+                    rtt_ms: None,
+                    direct: false,
+                    usable: false,
+                    note: "探测超时".to_string(),
+                });
+            }
         }
     }
     out.sort_by(|left, right| {
@@ -945,17 +1005,33 @@ async fn dial_helper(
     target: EndpointId,
     addrs: &[SocketAddr],
 ) -> anyhow::Result<Connection> {
+    let dial = helper_endpoint_addr(helper, addrs);
+    crate::netdebug::log(format!(
+        "session_dial helper={helper} target={target} dial={}",
+        format_endpoint_addr(&dial)
+    ));
     let connection = endpoint
-        .connect(helper_endpoint_addr(helper, addrs), ALPN)
+        .connect(dial, ALPN)
         .await
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+    crate::netdebug::log(format!(
+        "session_connected helper={helper} paths={}",
+        describe_conn_paths(&connection)
+    ));
     let (mut send, mut recv) = connection
         .open_bi()
         .await
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
     let session = new_session_id();
     write_hello_guest(&mut send, target, session).await?;
+    crate::netdebug::log(format!(
+        "session_hello_sent helper={helper} target={target} session={session:02x?}"
+    ));
     let status = read_hello_status(&mut recv).await?;
+    crate::netdebug::log(format!(
+        "session_hello_ack helper={helper} status={status} paths={}",
+        describe_conn_paths(&connection)
+    ));
     if status != 0 {
         connection.close(0u8.into(), b"reject");
         anyhow::bail!("互助中继拒绝了这次转发 ({status})");
@@ -964,21 +1040,38 @@ async fn dial_helper(
 }
 
 async fn notify_host_via_alpn(endpoint: Endpoint, invite: HostInvite) {
+    crate::netdebug::log(format!(
+        "invite_alpn_start host={} guest={} session={:02x?}",
+        invite.host_id, invite.guest_id, invite.session
+    ));
     let Ok(Ok(connection)) = tokio::time::timeout(
         Duration::from_secs(8),
         endpoint.connect(EndpointAddr::from(invite.host_id), INVITE_ALPN),
     )
     .await
     else {
+        crate::netdebug::log(format!(
+            "invite_alpn_fail host={} reason=connect_timeout_or_err",
+            invite.host_id
+        ));
         return;
     };
+    crate::netdebug::log(format!(
+        "invite_alpn_connected host={} paths={}",
+        invite.host_id,
+        describe_conn_paths(&connection)
+    ));
     let Ok((mut send, mut recv)) = connection.open_bi().await else {
         return;
     };
     if write_invite_wire(&mut send, &invite).await.is_err() {
         return;
     }
-    let _ = read_hello_status(&mut recv).await;
+    let status = read_hello_status(&mut recv).await.unwrap_or(255);
+    crate::netdebug::log(format!(
+        "invite_alpn_ack host={} status={status}",
+        invite.host_id
+    ));
     connection.close(0u8.into(), b"invite");
 }
 
@@ -990,27 +1083,45 @@ async fn answer_invite(
     if !stall.is_hosting().await {
         anyhow::bail!("摊位已打烊");
     }
+    let dial = helper_endpoint_addr(invite.helper_id, &invite.addrs);
+    crate::netdebug::log(format!(
+        "host_callback_dial helper={} session={:02x?} dial={}",
+        invite.helper_id,
+        invite.session,
+        format_endpoint_addr(&dial)
+    ));
     let connection = tokio::time::timeout(
         HELPER_DIAL,
-        endpoint.connect(
-            helper_endpoint_addr(invite.helper_id, &invite.addrs),
-            ALPN,
-        ),
+        endpoint.connect(dial, ALPN),
     )
     .await
     .map_err(|_| anyhow::anyhow!("回连帮手超时"))?
     .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+    crate::netdebug::log(format!(
+        "host_callback_connected helper={} paths={}",
+        invite.helper_id,
+        describe_conn_paths(&connection)
+    ));
     let (mut send, mut recv) = connection
         .open_bi()
         .await
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
     write_hello_host(&mut send, invite.session).await?;
     let status = read_hello_status(&mut recv).await?;
+    crate::netdebug::log(format!(
+        "host_callback_ack helper={} status={status}",
+        invite.helper_id
+    ));
     if status != 0 {
         connection.close(0u8.into(), b"reject");
         anyhow::bail!("帮手拒绝摊主回连 ({status})");
     }
-    let _ = wait_until_direct(&connection, PATH_WAIT).await;
+    let direct = wait_until_direct(&connection, PATH_WAIT).await;
+    crate::netdebug::log(format!(
+        "host_callback_ready helper={} direct={direct} paths={}",
+        invite.helper_id,
+        describe_conn_paths(&connection)
+    ));
     tracing::info!(helper = %invite.helper_id, "摊主已接到互助会话");
     stall.serve_helper_bridge(connection).await;
     Ok(())
@@ -1030,31 +1141,92 @@ fn selected_is_relay(connection: &Connection) -> Option<bool> {
 /// Wait for hole punch to promote off the public relay. Returns true only when
 /// the selected path is direct before `timeout`.
 async fn wait_until_direct(connection: &Connection, timeout: Duration) -> bool {
+    let remote = connection.remote_id();
     if selected_is_relay(connection) == Some(false) {
+        crate::netdebug::log(format!(
+            "path_already_direct remote={remote} paths={}",
+            describe_conn_paths(connection)
+        ));
         return true;
     }
+    crate::netdebug::log(format!(
+        "path_wait_direct remote={remote} timeout_ms={} paths={}",
+        timeout.as_millis(),
+        describe_conn_paths(connection)
+    ));
     let deadline = Instant::now() + timeout;
     let mut events = connection.path_events();
     loop {
         if selected_is_relay(connection) == Some(false) {
+            crate::netdebug::log(format!(
+                "path_became_direct remote={remote} paths={}",
+                describe_conn_paths(connection)
+            ));
             return true;
         }
         let rest = deadline.saturating_duration_since(Instant::now());
         if rest.is_zero() {
-            return selected_is_relay(connection) == Some(false);
+            let direct = selected_is_relay(connection) == Some(false);
+            crate::netdebug::log(format!(
+                "path_wait_done remote={remote} direct={direct} paths={}",
+                describe_conn_paths(connection)
+            ));
+            return direct;
         }
         tokio::select! {
             event = events.next() => {
                 match event {
-                    Some(_) => continue,
-                    None => return selected_is_relay(connection) == Some(false),
+                    Some(ev) => {
+                        crate::netdebug::log(format!(
+                            "path_event remote={remote} event={ev:?} paths={}",
+                            describe_conn_paths(connection)
+                        ));
+                        continue;
+                    }
+                    None => {
+                        let direct = selected_is_relay(connection) == Some(false);
+                        crate::netdebug::log(format!(
+                            "path_events_closed remote={remote} direct={direct}"
+                        ));
+                        return direct;
+                    }
                 }
             }
             _ = tokio::time::sleep(rest) => {
-                return selected_is_relay(connection) == Some(false);
+                let direct = selected_is_relay(connection) == Some(false);
+                crate::netdebug::log(format!(
+                    "path_wait_timeout remote={remote} direct={direct} paths={}",
+                    describe_conn_paths(connection)
+                ));
+                return direct;
             }
         }
     }
+}
+
+fn describe_conn_paths(connection: &Connection) -> String {
+    let paths = connection.paths();
+    let mut parts = Vec::new();
+    for path in &paths {
+        let selected = if path.is_selected() { "*" } else { "" };
+        let kind = if path.is_relay() { "relay" } else { "direct" };
+        parts.push(format!(
+            "{selected}{kind}:{}:{}ms",
+            path.remote_addr(),
+            path.rtt().as_millis()
+        ));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" | ")
+    }
+}
+
+fn format_endpoint_addr(addr: &EndpointAddr) -> String {
+    let ips: Vec<String> = addr.ip_addrs().map(|s| s.to_string()).collect();
+    let relays: Vec<String> = addr.relay_urls().map(|u| u.to_string()).collect();
+    format!("id={} ips={ips:?} relays={relays:?}", addr.id)
 }
 
 async fn bridge(

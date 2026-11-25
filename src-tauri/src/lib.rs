@@ -1,4 +1,5 @@
 mod commands;
+mod netdebug;
 mod p2p;
 mod proxy;
 mod security;
@@ -15,7 +16,7 @@ pub fn run() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "popstall_lib=info,iroh=warn".into()),
+                .unwrap_or_else(|_| "popstall_lib=info,iroh=info".into()),
         )
         .try_init();
 
@@ -25,6 +26,7 @@ pub fn run() {
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
+            crate::netdebug::init(&dir);
             app.manage(AppState::new(dir));
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

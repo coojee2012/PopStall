@@ -72,6 +72,7 @@ export type HelperStatus = {
   viaHelper: boolean;
   capable: boolean;
   reachNote: string;
+  netdebugPath?: string;
 };
 
 export type TalkLine = {

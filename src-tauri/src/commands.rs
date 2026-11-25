@@ -119,6 +119,7 @@ pub async fn helper_status(
             via_helper: false,
             capable: false,
             reach_note: "节点还没接上".to_string(),
+            netdebug_path: crate::netdebug::path_string(),
         });
     };
     Ok(node.helper_status().await)

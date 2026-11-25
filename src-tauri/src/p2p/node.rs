@@ -132,6 +132,21 @@ impl Node {
             .map(|socket| socket.to_string())
             .collect();
         tracing::info!(endpoint_id = %endpoint.id(), ?locals, "本机 UDP 已绑定");
+        crate::netdebug::log(format!(
+            "node_bound id={} locals={:?} addr_ips={:?} relays={:?}",
+            endpoint.id(),
+            locals,
+            endpoint
+                .addr()
+                .ip_addrs()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+            endpoint
+                .addr()
+                .relay_urls()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+        ));
         Ok(Self {
             endpoint,
             router,
@@ -169,6 +184,7 @@ impl Node {
                 via_helper: false,
                 capable: false,
                 reach_note: "节点还没接上".to_string(),
+                netdebug_path: crate::netdebug::path_string(),
             },
         }
     }

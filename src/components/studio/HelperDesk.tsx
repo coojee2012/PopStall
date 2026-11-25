@@ -1,5 +1,6 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { helperStatus } from "../../lib/api";
 import { refreshHelpers, switchHelper, useRouteStore } from "../../stores/route";
 import { useSession } from "../../stores/session";
 import { Button } from "../ui/button";
@@ -21,12 +22,16 @@ export function HelperDesk() {
   const stage = useSession((state) => state.stage);
   const guestId = stage?.kind === "guest" ? stage.endpointId ?? undefined : undefined;
   const visiting = stage?.kind === "guest";
+  const [netdebugPath, setNetdebugPath] = useState("");
 
   useEffect(() => {
     if (!desktop) {
       return;
     }
     void refreshHelpers(guestId);
+    void helperStatus()
+      .then((status) => setNetdebugPath(status.netdebugPath ?? ""))
+      .catch(() => setNetdebugPath(""));
     const timer = window.setInterval(() => void refreshHelpers(guestId), 12_000);
     return () => window.clearInterval(timer);
   }, [desktop, guestId]);
@@ -49,6 +54,12 @@ export function HelperDesk() {
             {desktop ? `广播里约有 ${helperOffers} 个 · 列表 ${helpers.length} 个` : "浏览器里只是预览"}
           </span>
         </div>
+
+        {desktop && netdebugPath ? (
+          <p className="break-all font-mono text-[11px] leading-5 text-muted">
+            网络调试日志（打包版也写盘）：{netdebugPath}
+          </p>
+        ) : null}
 
         {!desktop ? (
           <p className="text-sm text-muted">真正发现帮手要在闪摊窗口里，两端都在线且互助话题能通上。</p>
