@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,6 +30,7 @@ const PATH_WAIT: Duration = Duration::from_secs(3);
 const HELPER_DIAL: Duration = Duration::from_secs(8);
 const HOST_DIAL: Duration = Duration::from_secs(20);
 const PROBE_PICKS: usize = 3;
+const MAX_CARD_ADDRS: usize = 4;
 
 const TOPIC: TopicId = TopicId::from_bytes([
     0xdc, 0x3a, 0x9f, 0xdc, 0x8c, 0xfe, 0x1a, 0x46, 0xd3, 0x5f, 0xd2, 0x20, 0xd2, 0x41, 0xe3, 0x3f,
@@ -69,6 +70,8 @@ pub struct HelperStatus {
 pub(crate) struct LiveHelper {
     limit_bps: u32,
     load: u8,
+    /// Public dial addresses advertised by the helper (may be empty).
+    addrs: Vec<SocketAddr>,
     expires: Instant,
 }
 
@@ -102,6 +105,7 @@ impl HelperBook {
                 limit_bps,
                 load,
                 ttl,
+                addrs,
                 ..
             } => {
                 self.offers.lock().await.insert(
@@ -109,6 +113,7 @@ impl HelperBook {
                     LiveHelper {
                         limit_bps,
                         load,
+                        addrs,
                         expires: Instant::now() + Duration::from_secs(u64::from(ttl.max(30))),
                     },
                 );
@@ -117,6 +122,16 @@ impl HelperBook {
                 self.offers.lock().await.remove(&endpoint_id);
             }
         }
+    }
+
+    async fn addrs_for(&self, id: EndpointId) -> Vec<SocketAddr> {
+        let mut offers = self.offers.lock().await;
+        let now = Instant::now();
+        offers.retain(|_, live| live.expires > now);
+        offers
+            .get(&id)
+            .map(|live| live.addrs.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -165,12 +180,15 @@ impl HelperHub {
         if helper_id == target {
             anyhow::bail!("摊主自己不能给自己的摊当互助桥。需要第三方帮手，或等直连打通。");
         }
-        let connection = tokio::time::timeout(HELPER_DIAL, dial_helper(&self.endpoint, helper_id, target))
-            .await
+        let addrs = self.book.addrs_for(helper_id).await;
+        let connection = tokio::time::timeout(
+            HELPER_DIAL,
+            dial_helper(&self.endpoint, helper_id, target, &addrs),
+        )
+        .await
             .map_err(|_| anyhow::anyhow!("互助中继连接超时"))?
             .map_err(|err| anyhow::anyhow!("{err}"))?;
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        if selected_is_relay(&connection) != Some(false) {
+        if !wait_until_direct(&connection, PATH_WAIT).await {
             connection.close(0u8.into(), b"relay");
             anyhow::bail!("这个帮手目前也只能走公共中继，换一个或稍后再试");
         }
@@ -384,7 +402,7 @@ async fn serve_gossip(
         // broadcast goes into an empty helper mesh.
         refresh_helper_peers(&sender, &plaza).await;
         if was_on {
-            broadcast_open(&sender, &secret, &limit_bps, &active).await;
+            broadcast_open(&sender, &secret, &limit_bps, &active, &endpoint).await;
         }
         loop {
             tokio::select! {
@@ -395,7 +413,7 @@ async fn serve_gossip(
                     let on = *enabled_rx.borrow();
                     if on {
                         refresh_helper_peers(&sender, &plaza).await;
-                        broadcast_open(&sender, &secret, &limit_bps, &active).await;
+                        broadcast_open(&sender, &secret, &limit_bps, &active, &endpoint).await;
                         was_on = true;
                     } else if was_on {
                         let _ = sender.broadcast(Bytes::from(encode_bye(&secret))).await;
@@ -410,7 +428,7 @@ async fn serve_gossip(
                             let _ = enabled.send(false);
                             continue;
                         }
-                        broadcast_open(&sender, &secret, &limit_bps, &active).await;
+                        broadcast_open(&sender, &secret, &limit_bps, &active, &endpoint).await;
                         was_on = true;
                     }
                 }
@@ -470,11 +488,13 @@ async fn broadcast_open(
     secret: &SecretKey,
     limit_bps: &Arc<AtomicU32>,
     active: &Arc<AtomicUsize>,
+    endpoint: &Endpoint,
 ) {
     let load = active.load(Ordering::Relaxed).min(255) as u8;
-    let bytes = encode_open(secret, limit_bps.load(Ordering::Relaxed), load);
+    let addrs = dialable_addrs(endpoint);
+    let bytes = encode_open(secret, limit_bps.load(Ordering::Relaxed), load, &addrs);
     match sender.broadcast(Bytes::from(bytes)).await {
-        Ok(()) => tracing::info!("已广播互助中继"),
+        Ok(()) => tracing::info!(?addrs, "已广播互助中继"),
         Err(err) => tracing::warn!(?err, "互助中继广播失败"),
     }
 }
@@ -504,11 +524,11 @@ pub async fn connect_preferring_helper(
         return (direct, false);
     }
     let offers = book.list(endpoint.id()).await;
-    let candidates: Vec<EndpointId> = offers
+    let candidates: Vec<(EndpointId, Vec<SocketAddr>)> = offers
         .into_iter()
-        .map(|(id, _)| id)
-        .filter(|id| *id != target)
+        .filter(|(id, _)| *id != target)
         .take(PROBE_PICKS)
+        .map(|(id, live)| (id, live.addrs))
         .collect();
     if candidates.is_empty() {
         tracing::info!(%target, "没有可用的第三方互助中继（摊主自己不能桥接自己）");
@@ -545,12 +565,13 @@ pub async fn probe_offers(
             continue;
         }
         let started = Instant::now();
-        match tokio::time::timeout(Duration::from_secs(4), endpoint.connect(EndpointAddr::from(id), ALPN)).await
+        let dial = helper_endpoint_addr(id, &live.addrs);
+        match tokio::time::timeout(Duration::from_secs(8), endpoint.connect(dial, ALPN)).await
         {
             Ok(Ok(connection)) => {
-                tokio::time::sleep(Duration::from_millis(600)).await;
+                // Hole punch often finishes after the first relay path; wait before judging.
+                let direct = wait_until_direct(&connection, PATH_WAIT).await;
                 let rtt_ms = started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
-                let direct = selected_is_relay(&connection) == Some(false);
                 connection.close(0u8.into(), b"probe");
                 out.push(HelperOffer {
                     endpoint_id: id.to_string(),
@@ -561,8 +582,10 @@ pub async fn probe_offers(
                     usable: direct,
                     note: if direct {
                         format!("可直连 · 约 {rtt_ms} ms")
+                    } else if live.addrs.is_empty() {
+                        "连上了，但仍在走公共中继（对方没广播到公网地址）".to_string()
                     } else {
-                        "连上了，但仍在走公共中继，暂不适合作帮手".to_string()
+                        "连上了，但仍在走公共中继：公司网可能拦了直连 UDP，或对方公网端口打不进来".to_string()
                     },
                 });
             }
@@ -599,15 +622,14 @@ pub async fn probe_offers(
 async fn pick_helper(
     endpoint: &Endpoint,
     target: EndpointId,
-    candidates: &[EndpointId],
+    candidates: &[(EndpointId, Vec<SocketAddr>)],
 ) -> Option<Connection> {
     // Only a helper we can reach directly is worth using; another slow relay hop
     // does not fix the media path.
-    for id in candidates {
-        match tokio::time::timeout(HELPER_DIAL, dial_helper(endpoint, *id, target)).await {
+    for (id, addrs) in candidates {
+        match tokio::time::timeout(HELPER_DIAL, dial_helper(endpoint, *id, target, addrs)).await {
             Ok(Ok(connection)) => {
-                tokio::time::sleep(Duration::from_millis(800)).await;
-                if selected_is_relay(&connection) == Some(false) {
+                if wait_until_direct(&connection, PATH_WAIT).await {
                     return Some(connection);
                 }
                 tracing::debug!(helper = %id, "互助节点也在走中继，跳过");
@@ -688,13 +710,35 @@ fn is_globally_reachable_ip(ip: IpAddr) -> bool {
     }
 }
 
+fn dialable_addrs(endpoint: &Endpoint) -> Vec<SocketAddr> {
+    let mut out: Vec<SocketAddr> = endpoint
+        .addr()
+        .ip_addrs()
+        .copied()
+        .filter(|socket| is_globally_reachable_ip(socket.ip()))
+        .collect();
+    out.sort_by_key(|socket| (socket.is_ipv6(), socket.to_string()));
+    out.dedup();
+    out.truncate(MAX_CARD_ADDRS);
+    out
+}
+
+fn helper_endpoint_addr(id: EndpointId, addrs: &[SocketAddr]) -> EndpointAddr {
+    let mut addr = EndpointAddr::new(id);
+    for socket in addrs {
+        addr = addr.with_ip_addr(*socket);
+    }
+    addr
+}
+
 async fn dial_helper(
     endpoint: &Endpoint,
     helper: EndpointId,
     target: EndpointId,
+    addrs: &[SocketAddr],
 ) -> anyhow::Result<Connection> {
     let connection = endpoint
-        .connect(EndpointAddr::from(helper), ALPN)
+        .connect(helper_endpoint_addr(helper, addrs), ALPN)
         .await
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
     let (mut send, mut recv) = connection
@@ -719,6 +763,36 @@ fn selected_is_relay(connection: &Connection) -> Option<bool> {
         }
     }
     selected
+}
+
+/// Wait for hole punch to promote off the public relay. Returns true only when
+/// the selected path is direct before `timeout`.
+async fn wait_until_direct(connection: &Connection, timeout: Duration) -> bool {
+    if selected_is_relay(connection) == Some(false) {
+        return true;
+    }
+    let deadline = Instant::now() + timeout;
+    let mut events = connection.path_events();
+    loop {
+        if selected_is_relay(connection) == Some(false) {
+            return true;
+        }
+        let rest = deadline.saturating_duration_since(Instant::now());
+        if rest.is_zero() {
+            return selected_is_relay(connection) == Some(false);
+        }
+        tokio::select! {
+            event = events.next() => {
+                match event {
+                    Some(_) => continue,
+                    None => return selected_is_relay(connection) == Some(false),
+                }
+            }
+            _ = tokio::time::sleep(rest) => {
+                return selected_is_relay(connection) == Some(false);
+            }
+        }
+    }
 }
 
 async fn bridge(
@@ -810,15 +884,16 @@ enum HelperCard {
         load: u8,
         timestamp: u64,
         ttl: u32,
+        addrs: Vec<SocketAddr>,
     },
     Bye {
         endpoint_id: PublicKey,
     },
 }
 
-fn encode_open(secret: &SecretKey, limit_bps: u32, load: u8) -> Vec<u8> {
+fn encode_open(secret: &SecretKey, limit_bps: u32, load: u8, addrs: &[SocketAddr]) -> Vec<u8> {
     let limit = clamp_limit(limit_bps);
-    let mut body = Vec::with_capacity(4 + 1 + 1 + 32 + 8 + 4 + 4 + 1 + 64);
+    let mut body = Vec::with_capacity(4 + 1 + 1 + 32 + 8 + 4 + 4 + 1 + 1 + 64);
     body.extend_from_slice(CARD_MAGIC);
     body.push(1);
     body.push(KIND_OPEN);
@@ -828,9 +903,64 @@ fn encode_open(secret: &SecretKey, limit_bps: u32, load: u8) -> Vec<u8> {
     body.extend_from_slice(&CARD_TTL_SECS.to_be_bytes());
     body.extend_from_slice(&limit.to_be_bytes());
     body.push(load);
+    encode_addrs(&mut body, addrs);
     let signature = secret.sign(&body);
     body.extend_from_slice(&signature.to_bytes());
     body
+}
+
+fn encode_addrs(body: &mut Vec<u8>, addrs: &[SocketAddr]) {
+    let n = addrs.len().min(MAX_CARD_ADDRS) as u8;
+    body.push(n);
+    for socket in addrs.iter().take(MAX_CARD_ADDRS) {
+        match socket.ip() {
+            IpAddr::V4(ip) => {
+                body.push(4);
+                body.extend_from_slice(&ip.octets());
+            }
+            IpAddr::V6(ip) => {
+                body.push(6);
+                body.extend_from_slice(&ip.octets());
+            }
+        }
+        body.extend_from_slice(&socket.port().to_be_bytes());
+    }
+}
+
+fn decode_addrs(cursor: &mut &[u8]) -> Option<Vec<SocketAddr>> {
+    if cursor.is_empty() {
+        // Legacy cards without an address trailer.
+        return Some(Vec::new());
+    }
+    let n = *cursor.first()? as usize;
+    *cursor = &cursor[1..];
+    if n > MAX_CARD_ADDRS {
+        return None;
+    }
+    let mut addrs = Vec::with_capacity(n);
+    for _ in 0..n {
+        let family = *cursor.first()?;
+        *cursor = &cursor[1..];
+        let ip = match family {
+            4 => {
+                let octets: [u8; 4] = cursor.get(..4)?.try_into().ok()?;
+                *cursor = &cursor[4..];
+                IpAddr::V4(Ipv4Addr::from(octets))
+            }
+            6 => {
+                let octets: [u8; 16] = cursor.get(..16)?.try_into().ok()?;
+                *cursor = &cursor[16..];
+                IpAddr::V6(Ipv6Addr::from(octets))
+            }
+            _ => return None,
+        };
+        let port = u16::from_be_bytes(cursor.get(..2)?.try_into().ok()?);
+        *cursor = &cursor[2..];
+        if is_globally_reachable_ip(ip) {
+            addrs.push(SocketAddr::new(ip, port));
+        }
+    }
+    Some(addrs)
 }
 
 fn encode_bye(secret: &SecretKey) -> Vec<u8> {
@@ -881,6 +1011,7 @@ fn decode_card(bytes: &[u8], now: u64) -> Option<HelperCard> {
             cursor = &cursor[4..];
             let load = *cursor.first()?;
             cursor = &cursor[1..];
+            let addrs = decode_addrs(&mut cursor)?;
             if !cursor.is_empty() {
                 return None;
             }
@@ -890,6 +1021,7 @@ fn decode_card(bytes: &[u8], now: u64) -> Option<HelperCard> {
                 load,
                 timestamp,
                 ttl,
+                addrs,
             })
         }
         KIND_BYE => {
@@ -913,18 +1045,21 @@ mod tests {
     #[test]
     fn helper_cards_round_trip_and_reject_tampering() {
         let key = SecretKey::generate();
-        let open = encode_open(&key, DEFAULT_LIMIT_BPS, 2);
+        let addrs = vec!["1.2.3.4:1234".parse().unwrap()];
+        let open = encode_open(&key, DEFAULT_LIMIT_BPS, 2, &addrs);
         let parsed = decode_card(&open, card::unix_now()).unwrap();
         match parsed {
             HelperCard::Open {
                 endpoint_id,
                 limit_bps,
                 load,
+                addrs: got,
                 ..
             } => {
                 assert_eq!(endpoint_id, key.public());
                 assert_eq!(limit_bps, DEFAULT_LIMIT_BPS);
                 assert_eq!(load, 2);
+                assert_eq!(got, addrs);
             }
             HelperCard::Bye { .. } => panic!("expected open"),
         }
@@ -941,10 +1076,32 @@ mod tests {
     #[test]
     fn helper_cards_accept_across_different_process_uptimes() {
         let key = SecretKey::generate();
-        let open = encode_open(&key, DEFAULT_LIMIT_BPS, 0);
+        let open = encode_open(&key, DEFAULT_LIMIT_BPS, 0, &[]);
         // Receiver "uptime" must not matter: unix time is shared.
         assert!(decode_card(&open, card::unix_now()).is_some());
         assert!(decode_card(&open, 1).is_none());
+    }
+
+    #[test]
+    fn helper_cards_keep_legacy_open_without_addrs() {
+        let key = SecretKey::generate();
+        // Build a pre-addr card: stop after load, then sign.
+        let mut body = Vec::new();
+        body.extend_from_slice(CARD_MAGIC);
+        body.push(1);
+        body.push(KIND_OPEN);
+        body.extend_from_slice(key.public().as_bytes());
+        body.extend_from_slice(&card::unix_now().to_be_bytes());
+        body.extend_from_slice(&CARD_TTL_SECS.to_be_bytes());
+        body.extend_from_slice(&DEFAULT_LIMIT_BPS.to_be_bytes());
+        body.push(0);
+        let signature = key.sign(&body);
+        body.extend_from_slice(&signature.to_bytes());
+        let parsed = decode_card(&body, card::unix_now()).unwrap();
+        match parsed {
+            HelperCard::Open { addrs, .. } => assert!(addrs.is_empty()),
+            HelperCard::Bye { .. } => panic!("expected open"),
+        }
     }
 
     #[test]
