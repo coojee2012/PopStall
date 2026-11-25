@@ -243,14 +243,16 @@ impl HelperHub {
             anyhow::bail!("摊主自己不能给自己的摊当互助桥。需要第三方帮手，或等直连打通。");
         }
         let addrs = self.book.addrs_for(helper_id).await;
-        let connection = tokio::time::timeout(
+        let (connection, known_direct) = tokio::time::timeout(
             HELPER_SESSION,
             dial_helper(&self.endpoint, helper_id, target, &addrs),
         )
         .await
         .map_err(|_| anyhow::anyhow!("互助中继连接超时"))?
         .map_err(|err| anyhow::anyhow!("{err}"))?;
-        if !wait_until_direct(&connection, PATH_WAIT).await {
+        // IP-only dials never touch n0 (known_direct). Otherwise require a
+        // non-relay path before treating the helper as usable.
+        if !known_direct && !ensure_has_direct(&connection, PATH_WAIT).await {
             connection.close(0u8.into(), b"relay");
             anyhow::bail!("这个帮手目前也只能走公共中继，换一个或稍后再试");
         }
@@ -816,12 +818,15 @@ pub async fn connect_preferring_helper(
         return (direct, false);
     }
     let offers = book.list(endpoint.id()).await;
-    let candidates: Vec<(EndpointId, Vec<SocketAddr>)> = offers
+    // Prefer helpers that already advertised a public dial address.
+    let mut ranked: Vec<(EndpointId, Vec<SocketAddr>)> = offers
         .into_iter()
         .filter(|(id, _)| *id != target)
-        .take(PROBE_PICKS)
         .map(|(id, live)| (id, live.addrs))
         .collect();
+    ranked.sort_by(|left, right| right.1.is_empty().cmp(&left.1.is_empty()));
+    let candidates: Vec<(EndpointId, Vec<SocketAddr>)> =
+        ranked.into_iter().take(PROBE_PICKS).collect();
     if candidates.is_empty() {
         tracing::info!(%target, "没有可用的第三方互助中继（摊主自己不能桥接自己）");
         return (direct, false);
@@ -841,13 +846,10 @@ pub async fn probe_offers(
     self_id: EndpointId,
     exclude: Option<EndpointId>,
 ) -> Vec<HelperOffer> {
-    // Overlapping probes from UI timers abort path upgrades mid-flight.
-    static PROBE_GATE: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    // Serialize probes so overlapping UI refreshes wait instead of wiping the list.
+    static PROBE_GATE: OnceLock<Mutex<()>> = OnceLock::new();
     let gate = PROBE_GATE.get_or_init(|| Mutex::new(()));
-    let Ok(_probe_guard) = gate.try_lock() else {
-        crate::netdebug::log("probe_skip reason=already_running");
-        return Vec::new();
-    };
+    let _probe_guard = gate.lock().await;
 
     let raw = book.list(self_id).await;
     let local = format_endpoint_addr(&endpoint.addr());
@@ -1009,8 +1011,8 @@ async fn pick_helper(
     // does not fix the media path.
     for (id, addrs) in candidates {
         match tokio::time::timeout(HELPER_SESSION, dial_helper(endpoint, *id, target, addrs)).await {
-            Ok(Ok(connection)) => {
-                if wait_until_direct(&connection, PATH_WAIT).await {
+            Ok(Ok((connection, known_direct))) => {
+                if known_direct || ensure_has_direct(&connection, PATH_WAIT).await {
                     return Some(connection);
                 }
                 tracing::debug!(helper = %id, "互助节点也在走中继，跳过");
@@ -1216,15 +1218,17 @@ async fn connect_ip_only(
     Ok(connection)
 }
 
+/// Returns `(connection, known_direct)` — `known_direct` is true when the
+/// dial used the relay-disabled endpoint (definitionally not n0).
 async fn dial_helper(
     endpoint: &Endpoint,
     helper: EndpointId,
     target: EndpointId,
     addrs: &[SocketAddr],
-) -> anyhow::Result<Connection> {
-    let connection = if !addrs.is_empty() {
+) -> anyhow::Result<(Connection, bool)> {
+    let (connection, known_direct) = if !addrs.is_empty() {
         match connect_ip_only(helper, addrs, ALPN, HELPER_DIAL).await {
-            Ok(conn) => conn,
+            Ok(conn) => (conn, true),
             Err(err) => {
                 crate::netdebug::log(format!(
                     "session_ip_only_fail helper={helper} err={err}; fallback_main"
@@ -1234,10 +1238,11 @@ async fn dial_helper(
                     "session_dial helper={helper} target={target} dial={}",
                     format_endpoint_addr(&dial)
                 ));
-                endpoint
+                let conn = endpoint
                     .connect(dial, ALPN)
                     .await
-                    .map_err(|e| anyhow::anyhow!("{e:?}"))?
+                    .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                (conn, false)
             }
         }
     } else {
@@ -1246,13 +1251,14 @@ async fn dial_helper(
             "session_dial helper={helper} target={target} dial={}",
             format_endpoint_addr(&dial)
         ));
-        endpoint
+        let conn = endpoint
             .connect(dial, ALPN)
             .await
-            .map_err(|err| anyhow::anyhow!("{err:?}"))?
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        (conn, false)
     };
     crate::netdebug::log(format!(
-        "session_connected helper={helper} paths={}",
+        "session_connected helper={helper} known_direct={known_direct} paths={}",
         describe_conn_paths(&connection)
     ));
     let (mut send, mut recv) = connection
@@ -1273,7 +1279,7 @@ async fn dial_helper(
         connection.close(0u8.into(), b"reject");
         anyhow::bail!("互助中继拒绝了这次转发 ({status})");
     }
-    Ok(connection)
+    Ok((connection, known_direct))
 }
 
 async fn notify_host_via_alpn(endpoint: Endpoint, invite: HostInvite) {
@@ -1387,11 +1393,26 @@ fn selected_is_relay(connection: &Connection) -> Option<bool> {
     selected
 }
 
-/// Wait for hole punch to promote off the public relay. Returns true only when
-/// the selected path is direct before `timeout`.
+fn has_ip_path(connection: &Connection) -> bool {
+    connection.paths().iter().any(|path| !path.is_relay())
+}
+
+fn path_looks_direct(connection: &Connection) -> bool {
+    has_ip_path(connection) || selected_is_relay(connection) == Some(false)
+}
+
+/// True when the connection already has (or quickly gains) a non-relay path.
+async fn ensure_has_direct(connection: &Connection, timeout: Duration) -> bool {
+    if path_looks_direct(connection) {
+        return true;
+    }
+    wait_until_direct(connection, timeout).await
+}
+
+/// Wait for hole punch to promote off the public relay.
 async fn wait_until_direct(connection: &Connection, timeout: Duration) -> bool {
     let remote = connection.remote_id();
-    if selected_is_relay(connection) == Some(false) {
+    if path_looks_direct(connection) {
         crate::netdebug::log(format!(
             "path_already_direct remote={remote} paths={}",
             describe_conn_paths(connection)
@@ -1406,7 +1427,7 @@ async fn wait_until_direct(connection: &Connection, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     let mut events = connection.path_events();
     loop {
-        if selected_is_relay(connection) == Some(false) {
+        if path_looks_direct(connection) {
             crate::netdebug::log(format!(
                 "path_became_direct remote={remote} paths={}",
                 describe_conn_paths(connection)
@@ -1415,7 +1436,7 @@ async fn wait_until_direct(connection: &Connection, timeout: Duration) -> bool {
         }
         let rest = deadline.saturating_duration_since(Instant::now());
         if rest.is_zero() {
-            let direct = selected_is_relay(connection) == Some(false);
+            let direct = path_looks_direct(connection);
             crate::netdebug::log(format!(
                 "path_wait_done remote={remote} direct={direct} paths={}",
                 describe_conn_paths(connection)
@@ -1433,7 +1454,7 @@ async fn wait_until_direct(connection: &Connection, timeout: Duration) -> bool {
                         continue;
                     }
                     None => {
-                        let direct = selected_is_relay(connection) == Some(false);
+                        let direct = path_looks_direct(connection);
                         crate::netdebug::log(format!(
                             "path_events_closed remote={remote} direct={direct}"
                         ));
@@ -1442,7 +1463,7 @@ async fn wait_until_direct(connection: &Connection, timeout: Duration) -> bool {
                 }
             }
             _ = tokio::time::sleep(rest) => {
-                let direct = selected_is_relay(connection) == Some(false);
+                let direct = path_looks_direct(connection);
                 crate::netdebug::log(format!(
                     "path_wait_timeout remote={remote} direct={direct} paths={}",
                     describe_conn_paths(connection)
