@@ -63,8 +63,13 @@ export function startRoute(): () => void {
       });
       const stage = useSession.getState().stage;
       const guestId = stage?.kind === "guest" ? stage.endpointId : null;
-      if (status.relayOnly && !status.viaHelper && (status.helperOffers > 0 || guestId)) {
+      // Keep the 互助 list populated whenever anyone is announcing — not only on
+      // the slow-relay auto-switch path (otherwise the desk stays empty while
+      // plaza already works).
+      if (status.helperOffers > 0 || (status.relayOnly && guestId)) {
         await refreshHelpers(guestId ?? undefined);
+      }
+      if (status.relayOnly && !status.viaHelper) {
         maybeAutoSwitch(guestId ?? undefined);
       }
     } catch {

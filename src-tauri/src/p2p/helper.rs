@@ -13,6 +13,7 @@ use iroh_gossip::{Event, Gossip, GossipSender, JoinOptions, TopicId};
 use serde::Serialize;
 use tokio::sync::{watch, Mutex, Semaphore};
 
+use super::card;
 use super::node::{self, RouteBook};
 use super::plaza::Plaza;
 use crate::security::BandwidthLimit;
@@ -24,7 +25,7 @@ pub const MAX_LIMIT_BPS: u32 = 4 * 1024 * 1024;
 
 const MAX_SESSIONS: usize = 4;
 const CARD_TTL_SECS: u32 = 90;
-const TICK: Duration = Duration::from_secs(20);
+const TICK: Duration = Duration::from_secs(10);
 const PATH_WAIT: Duration = Duration::from_secs(3);
 const HELPER_DIAL: Duration = Duration::from_secs(8);
 const HOST_DIAL: Duration = Duration::from_secs(20);
@@ -229,7 +230,14 @@ impl ProtocolHandler for HelperHandler {
             connection.close(0u8.into(), b"off");
             return Ok(());
         }
+        // Wait for a real session hello before taking a slot — latency probes only
+        // open the connection and must not burn MAX_SESSIONS.
+        let (mut send, mut recv) = match connection.accept_bi().await {
+            Ok(pair) => pair,
+            Err(_) => return Ok(()),
+        };
         let Ok(permit) = self.sessions.clone().try_acquire_owned() else {
+            let _ = write_hello_status(&mut send, 5).await;
             connection.close(0u8.into(), b"busy");
             return Ok(());
         };
@@ -237,10 +245,6 @@ impl ProtocolHandler for HelperHandler {
         let _guard = SessionGuard {
             active: self.active.clone(),
             _permit: permit,
-        };
-        let (mut send, mut recv) = match connection.accept_bi().await {
-            Ok(pair) => pair,
-            Err(_) => return Ok(()),
         };
         let target = match read_hello(&mut recv).await {
             Ok(target) => target,
@@ -374,7 +378,11 @@ async fn serve_gossip(
         };
         let (sender, mut receiver) = topic.split();
         let mut tick = tokio::time::interval(TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut was_on = *enabled_rx.borrow();
+        // Join plaza peers before the first announce, otherwise the first
+        // broadcast goes into an empty helper mesh.
+        refresh_helper_peers(&sender, &plaza).await;
         if was_on {
             broadcast_open(&sender, &secret, &limit_bps, &active).await;
         }
@@ -386,6 +394,7 @@ async fn serve_gossip(
                     }
                     let on = *enabled_rx.borrow();
                     if on {
+                        refresh_helper_peers(&sender, &plaza).await;
                         broadcast_open(&sender, &secret, &limit_bps, &active).await;
                         was_on = true;
                     } else if was_on {
@@ -394,8 +403,7 @@ async fn serve_gossip(
                     }
                 }
                 _ = tick.tick() => {
-                    let peers = plaza.peer_ids(16).await;
-                    let _ = sender.join_peers(peers).await;
+                    refresh_helper_peers(&sender, &plaza).await;
                     if *enabled_rx.borrow() {
                         if !reachability_ok(&endpoint, &routes) {
                             tracing::info!("互助中继已关闭：当前直连不到这台机器");
@@ -412,12 +420,30 @@ async fn serve_gossip(
                     };
                     match event {
                         Ok(Event::Received(message)) => {
-                            if message.delivered_from == self_id {
-                                continue;
+                            match decode_card(&message.content, card::unix_now()) {
+                                Some(HelperCard::Open { endpoint_id, .. }) if endpoint_id == self_id => {}
+                                Some(HelperCard::Bye { endpoint_id }) if endpoint_id == self_id => {}
+                                Some(parsed) => {
+                                    let who = match &parsed {
+                                        HelperCard::Open { endpoint_id, .. } | HelperCard::Bye { endpoint_id } => {
+                                            endpoint_id.to_string()
+                                        }
+                                    };
+                                    book.ingest(parsed).await;
+                                    tracing::info!(helper = %who, "收到互助中继广播");
+                                }
+                                None => {
+                                    tracing::debug!(
+                                        from = %message.delivered_from,
+                                        bytes = message.content.len(),
+                                        "互助广播无法解析"
+                                    );
+                                }
                             }
-                            if let Some(card) = decode_card(&message.content, lamport_stamp()) {
-                                book.ingest(card).await;
-                            }
+                        }
+                        Ok(Event::NeighborUp(id)) => {
+                            tracing::debug!(%id, "helper neighbor up");
+                            let _ = sender.join_peers(vec![id]).await;
                         }
                         Ok(Event::Lagged) => tracing::debug!("helper gossip lagged"),
                         Ok(_) => {}
@@ -429,6 +455,16 @@ async fn serve_gossip(
     }
 }
 
+async fn refresh_helper_peers(sender: &GossipSender, plaza: &Plaza) {
+    let peers = plaza.peer_ids(32).await;
+    if peers.is_empty() {
+        return;
+    }
+    if let Err(err) = sender.join_peers(peers).await {
+        tracing::debug!(?err, "helper join failed");
+    }
+}
+
 async fn broadcast_open(
     sender: &GossipSender,
     secret: &SecretKey,
@@ -437,8 +473,9 @@ async fn broadcast_open(
 ) {
     let load = active.load(Ordering::Relaxed).min(255) as u8;
     let bytes = encode_open(secret, limit_bps.load(Ordering::Relaxed), load);
-    if let Err(err) = sender.broadcast(Bytes::from(bytes)).await {
-        tracing::debug!(?err, "helper announce failed");
+    match sender.broadcast(Bytes::from(bytes)).await {
+        Ok(()) => tracing::info!("已广播互助中继"),
+        Err(err) => tracing::warn!(?err, "互助中继广播失败"),
     }
 }
 
@@ -786,8 +823,8 @@ fn encode_open(secret: &SecretKey, limit_bps: u32, load: u8) -> Vec<u8> {
     body.push(1);
     body.push(KIND_OPEN);
     body.extend_from_slice(secret.public().as_bytes());
-    let timestamp = lamport_stamp();
-    body.extend_from_slice(&timestamp.to_be_bytes());
+    // Same clock basis as plaza cards so peers with different uptimes still accept us.
+    body.extend_from_slice(&card::unix_now().to_be_bytes());
     body.extend_from_slice(&CARD_TTL_SECS.to_be_bytes());
     body.extend_from_slice(&limit.to_be_bytes());
     body.push(load);
@@ -802,7 +839,7 @@ fn encode_bye(secret: &SecretKey) -> Vec<u8> {
     body.push(1);
     body.push(KIND_BYE);
     body.extend_from_slice(secret.public().as_bytes());
-    body.extend_from_slice(&lamport_stamp().to_be_bytes());
+    body.extend_from_slice(&card::unix_now().to_be_bytes());
     body.extend_from_slice(&CARD_TTL_SECS.to_be_bytes());
     let signature = secret.sign(&body);
     body.extend_from_slice(&signature.to_bytes());
@@ -869,12 +906,6 @@ fn clamp_limit(limit_bps: u32) -> u32 {
     limit_bps.clamp(MIN_LIMIT_BPS, MAX_LIMIT_BPS)
 }
 
-fn lamport_stamp() -> u64 {
-    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    let start = START.get_or_init(Instant::now);
-    1 + start.elapsed().as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -883,8 +914,8 @@ mod tests {
     fn helper_cards_round_trip_and_reject_tampering() {
         let key = SecretKey::generate();
         let open = encode_open(&key, DEFAULT_LIMIT_BPS, 2);
-        let card = decode_card(&open, lamport_stamp() + 1).unwrap();
-        match card {
+        let parsed = decode_card(&open, card::unix_now()).unwrap();
+        match parsed {
             HelperCard::Open {
                 endpoint_id,
                 limit_bps,
@@ -899,12 +930,21 @@ mod tests {
         }
         let mut bad = open;
         *bad.last_mut().unwrap() ^= 1;
-        assert!(decode_card(&bad, lamport_stamp() + 1).is_none());
+        assert!(decode_card(&bad, card::unix_now()).is_none());
         let bye = encode_bye(&key);
         assert!(matches!(
-            decode_card(&bye, lamport_stamp() + 1),
+            decode_card(&bye, card::unix_now()),
             Some(HelperCard::Bye { .. })
         ));
+    }
+
+    #[test]
+    fn helper_cards_accept_across_different_process_uptimes() {
+        let key = SecretKey::generate();
+        let open = encode_open(&key, DEFAULT_LIMIT_BPS, 0);
+        // Receiver "uptime" must not matter: unix time is shared.
+        assert!(decode_card(&open, card::unix_now()).is_some());
+        assert!(decode_card(&open, 1).is_none());
     }
 
     #[test]
