@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,8 @@ const RELAY_NOTICE_AFTER: Duration = Duration::from_secs(8);
 #[derive(Default)]
 pub struct RouteBook {
     live: Mutex<HashMap<String, bool>>,
+    /// Someone reached us on a direct path while we were the stall host.
+    inbound_direct: AtomicBool,
 }
 
 impl RouteBook {
@@ -45,6 +48,14 @@ impl RouteBook {
             .lock()
             .map(|live| live.values().any(|flag| *flag))
             .unwrap_or(false)
+    }
+
+    pub fn note_inbound_direct(&self) {
+        self.inbound_direct.store(true, Ordering::Relaxed);
+    }
+
+    pub fn inbound_direct(&self) -> bool {
+        self.inbound_direct.load(Ordering::Relaxed)
     }
 }
 
@@ -84,7 +95,7 @@ impl Node {
             let plaza = super::plaza::start(endpoint.clone(), gossip.clone(), mdns);
             let talk = super::talk::start(endpoint.clone(), gossip.clone(), plaza.clone());
             router = router.accept(super::talk::ALPN, talk.handler());
-            let helper = super::helper::start(endpoint.clone(), gossip, plaza.clone());
+            let helper = super::helper::start(endpoint.clone(), gossip, plaza.clone(), routes.clone());
             router = router.accept(super::helper::ALPN, helper.handler());
             (Some(plaza), Some(talk), Some(helper))
         };
@@ -130,6 +141,8 @@ impl Node {
                 active: 0,
                 offers: 0,
                 via_helper: false,
+                capable: false,
+                reach_note: "节点还没接上".to_string(),
             },
         }
     }
@@ -281,6 +294,9 @@ pub(crate) fn watch_paths(connection: Connection, role: &'static str, routes: Ar
     let remote = connection.remote_id();
     let key = remote.to_string();
     tracing::info!(%remote, role, paths = %describe_paths(&connection), "连接已建立");
+    if role == "host" && selected_is_relay(&connection) == Some(false) {
+        routes.note_inbound_direct();
+    }
     let mut relay_since = (selected_is_relay(&connection) == Some(true)).then(Instant::now);
     tokio::spawn(async move {
         let mut events = connection.path_events();
@@ -300,6 +316,9 @@ pub(crate) fn watch_paths(connection: Connection, role: &'static str, routes: Ar
                             } else {
                                 relay_since = None;
                                 routes.set(&key, false);
+                                if role == "host" {
+                                    routes.note_inbound_direct();
+                                }
                             }
                         }
                         Some(PathEvent::Closed { remote_addr, last_stats, .. }) => {

@@ -109,6 +109,8 @@ pub async fn helper_status(
             active: 0,
             offers: 0,
             via_helper: false,
+            capable: false,
+            reach_note: "节点还没接上".to_string(),
         });
     };
     Ok(node.helper_status().await)

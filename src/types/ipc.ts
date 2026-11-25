@@ -59,6 +59,8 @@ export type HelperStatus = {
   active: number;
   offers: number;
   viaHelper: boolean;
+  capable: boolean;
+  reachNote: string;
 };
 
 export type TalkLine = {

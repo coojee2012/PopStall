@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -55,6 +56,8 @@ pub struct HelperStatus {
     pub active: usize,
     pub offers: usize,
     pub via_helper: bool,
+    pub capable: bool,
+    pub reach_note: String,
 }
 
 #[derive(Clone, Debug)]
@@ -132,6 +135,7 @@ pub struct HelperHub {
     bandwidth: Arc<Mutex<Arc<BandwidthLimit>>>,
     book: HelperBook,
     endpoint: Endpoint,
+    routes: Arc<RouteBook>,
     via_helper: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -142,12 +146,15 @@ impl HelperHub {
         let active = self.active.load(Ordering::Relaxed);
         let via_helper = self.via_helper.load(Ordering::Relaxed);
         let offers = self.book.list(self.endpoint.id()).await.len();
+        let (capable, reach_note) = reach_snapshot(&self.endpoint, &self.routes);
         HelperStatus {
             enabled,
             limit_bps,
             active,
             offers,
             via_helper,
+            capable,
+            reach_note,
         }
     }
 
@@ -159,6 +166,9 @@ impl HelperHub {
         let limit = clamp_limit(limit_bps);
         self.limit_bps.store(limit, Ordering::Relaxed);
         *self.bandwidth.lock().await = Arc::new(BandwidthLimit::new(u64::from(limit)));
+        if enabled {
+            wait_reachability(&self.endpoint, &self.routes, Duration::from_secs(6)).await?;
+        }
         let _ = self.enabled.send(enabled);
         Ok(())
     }
@@ -279,13 +289,13 @@ impl Drop for SessionGuard {
     }
 }
 
-pub fn start(endpoint: Endpoint, gossip: Gossip, plaza: Plaza) -> HelperHub {
-    let (enabled, enabled_rx) = watch::channel(false);
+pub fn start(endpoint: Endpoint, gossip: Gossip, plaza: Plaza, routes: Arc<RouteBook>) -> HelperHub {
+    let (enabled, _) = watch::channel(false);
     let limit_bps = Arc::new(AtomicU32::new(DEFAULT_LIMIT_BPS));
     let active = Arc::new(AtomicUsize::new(0));
     let book = HelperBook::new();
     let hub = HelperHub {
-        enabled,
+        enabled: enabled.clone(),
         limit_bps: limit_bps.clone(),
         active: active.clone(),
         sessions: Arc::new(Semaphore::new(MAX_SESSIONS)),
@@ -294,6 +304,7 @@ pub fn start(endpoint: Endpoint, gossip: Gossip, plaza: Plaza) -> HelperHub {
         ))))),
         book: book.clone(),
         endpoint: endpoint.clone(),
+        routes: routes.clone(),
         via_helper: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let secret = endpoint.secret_key().clone();
@@ -304,10 +315,12 @@ pub fn start(endpoint: Endpoint, gossip: Gossip, plaza: Plaza) -> HelperHub {
             gossip,
             plaza,
             secret,
-            enabled_rx,
+            enabled,
             limit_bps,
             active,
             book,
+            routes,
+            endpoint,
             self_id,
         )
         .await;
@@ -319,12 +332,15 @@ async fn serve_gossip(
     gossip: Gossip,
     plaza: Plaza,
     secret: SecretKey,
-    mut enabled: watch::Receiver<bool>,
+    enabled: watch::Sender<bool>,
     limit_bps: Arc<AtomicU32>,
     active: Arc<AtomicUsize>,
     book: HelperBook,
+    routes: Arc<RouteBook>,
+    endpoint: Endpoint,
     self_id: EndpointId,
 ) {
+    let mut enabled_rx = enabled.subscribe();
     loop {
         let peers = plaza.peer_ids(16).await;
         let options = JoinOptions::with_bootstrap(peers).with_subscription_capacity(128);
@@ -338,17 +354,17 @@ async fn serve_gossip(
         };
         let (sender, mut receiver) = topic.split();
         let mut tick = tokio::time::interval(TICK);
-        let mut was_on = *enabled.borrow();
+        let mut was_on = *enabled_rx.borrow();
         if was_on {
             broadcast_open(&sender, &secret, &limit_bps, &active).await;
         }
         loop {
             tokio::select! {
-                changed = enabled.changed() => {
+                changed = enabled_rx.changed() => {
                     if changed.is_err() {
                         return;
                     }
-                    let on = *enabled.borrow();
+                    let on = *enabled_rx.borrow();
                     if on {
                         broadcast_open(&sender, &secret, &limit_bps, &active).await;
                         was_on = true;
@@ -360,7 +376,12 @@ async fn serve_gossip(
                 _ = tick.tick() => {
                     let peers = plaza.peer_ids(16).await;
                     let _ = sender.join_peers(peers).await;
-                    if *enabled.borrow() {
+                    if *enabled_rx.borrow() {
+                        if !reachability_ok(&endpoint, &routes) {
+                            tracing::info!("互助中继已关闭：当前直连不到这台机器");
+                            let _ = enabled.send(false);
+                            continue;
+                        }
                         broadcast_open(&sender, &secret, &limit_bps, &active).await;
                         was_on = true;
                     }
@@ -451,34 +472,91 @@ async fn pick_helper(
     target: EndpointId,
     candidates: &[EndpointId],
 ) -> Option<Connection> {
-    let mut best: Option<(Connection, bool)> = None;
+    // Only a helper we can reach directly is worth using; another slow relay hop
+    // does not fix the media path.
     for id in candidates {
         match tokio::time::timeout(HELPER_DIAL, dial_helper(endpoint, *id, target)).await {
             Ok(Ok(connection)) => {
-                let directish = selected_is_relay(&connection) == Some(false);
-                if directish {
-                    if let Some((previous, _)) = best.take() {
-                        previous.close(0u8.into(), b"skip");
-                    }
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                if selected_is_relay(&connection) == Some(false) {
                     return Some(connection);
                 }
-                match best.take() {
-                    Some((previous, true)) => {
-                        best = Some((previous, true));
-                        connection.close(0u8.into(), b"skip");
-                    }
-                    Some((previous, false)) => {
-                        previous.close(0u8.into(), b"skip");
-                        best = Some((connection, false));
-                    }
-                    None => best = Some((connection, false)),
-                }
+                tracing::debug!(helper = %id, "互助节点也在走中继，跳过");
+                connection.close(0u8.into(), b"skip");
             }
             Ok(Err(err)) => tracing::debug!(helper = %id, ?err, "互助中继不可用"),
             Err(_) => tracing::debug!(helper = %id, "互助中继探测超时"),
         }
     }
-    best.map(|(connection, _)| connection)
+    None
+}
+
+fn reachability_ok(endpoint: &Endpoint, routes: &RouteBook) -> bool {
+    routes.inbound_direct() || has_global_dial_addr(endpoint)
+}
+
+fn reach_snapshot(endpoint: &Endpoint, routes: &RouteBook) -> (bool, String) {
+    if routes.inbound_direct() {
+        return (
+            true,
+            "已有人直连打到过你，适合当互助中继。".to_string(),
+        );
+    }
+    if has_global_dial_addr(endpoint) {
+        return (
+            true,
+            "本机已有可被拨号的公网地址，适合当互助中继。".to_string(),
+        );
+    }
+    (
+        false,
+        "现在直连不到你：还没有公网地址，也还没有人打洞打到这台机器。不需要自己填端口；等网络就绪或有人成功直连后再开。".to_string(),
+    )
+}
+
+async fn wait_reachability(
+    endpoint: &Endpoint,
+    routes: &RouteBook,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if reachability_ok(endpoint, routes) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(reach_snapshot(endpoint, routes).1);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn has_global_dial_addr(endpoint: &Endpoint) -> bool {
+    endpoint
+        .addr()
+        .ip_addrs()
+        .any(|socket| is_globally_reachable_ip(socket.ip()))
+}
+
+fn is_globally_reachable_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            !(v4.is_unspecified()
+                || v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation())
+        }
+        IpAddr::V6(v6) => {
+            let octets = v6.octets();
+            let unique_local = (octets[0] & 0xfe) == 0xfc;
+            !(v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_unicast_link_local()
+                || unique_local)
+        }
+    }
 }
 
 async fn dial_helper(
@@ -742,5 +820,15 @@ mod tests {
         assert_eq!(clamp_limit(100), MIN_LIMIT_BPS);
         assert_eq!(clamp_limit(DEFAULT_LIMIT_BPS), DEFAULT_LIMIT_BPS);
         assert_eq!(clamp_limit(u32::MAX), MAX_LIMIT_BPS);
+    }
+
+    #[test]
+    fn global_ip_skips_lan_and_keeps_public() {
+        assert!(!is_globally_reachable_ip("10.0.0.1".parse().unwrap()));
+        assert!(!is_globally_reachable_ip("192.168.1.2".parse().unwrap()));
+        assert!(!is_globally_reachable_ip("127.0.0.1".parse().unwrap()));
+        assert!(is_globally_reachable_ip("1.1.1.1".parse().unwrap()));
+        assert!(!is_globally_reachable_ip("fd12::1".parse().unwrap()));
+        assert!(is_globally_reachable_ip("2001:4860:4860::8888".parse().unwrap()));
     }
 }

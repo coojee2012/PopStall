@@ -49,6 +49,8 @@ export function HelperRelayCard() {
   const [enabled, setEnabled] = useState(false);
   const [limitBps, setLimitBps] = useState(DEFAULT_LIMIT_BPS);
   const [active, setActive] = useState(0);
+  const [capable, setCapable] = useState(false);
+  const [reachNote, setReachNote] = useState("正在看这台机器能不能被直连…");
   const [busy, setBusy] = useState(false);
   const [ask, setAsk] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -57,7 +59,9 @@ export function HelperRelayCard() {
     const pref = loadPref();
     setLimitBps(pref.limitBps);
     if (!desktop) {
-      setEnabled(pref.enabled);
+      setEnabled(false);
+      setCapable(true);
+      setReachNote("浏览器预览不检测网络。真正当中继要在闪摊窗口里。");
       return;
     }
     void (async () => {
@@ -66,16 +70,56 @@ export function HelperRelayCard() {
         setEnabled(status.enabled);
         setLimitBps(status.limitBps);
         setActive(status.active);
+        setCapable(status.capable);
+        setReachNote(status.reachNote);
+        if (pref.enabled && !status.enabled) {
+          savePref({ enabled: false, limitBps: status.limitBps });
+        }
       } catch (error) {
+        setEnabled(false);
+        savePref({ enabled: false, limitBps: pref.limitBps });
         setProblem(errorText(error));
+        try {
+          const status = await api.helperStatus();
+          setCapable(status.capable);
+          setReachNote(status.reachNote);
+          setLimitBps(status.limitBps);
+        } catch {
+          // Keep the error from helperSet.
+        }
       }
     })();
+  }, [desktop]);
+
+  useEffect(() => {
+    if (!desktop) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const status = await api.helperStatus();
+          setCapable(status.capable);
+          setReachNote(status.reachNote);
+          setActive(status.active);
+          setEnabled(status.enabled);
+          if (!status.enabled) {
+            const pref = loadPref();
+            if (pref.enabled) {
+              savePref({ enabled: false, limitBps: pref.limitBps });
+            }
+          }
+        } catch {
+          // Keep the last known note.
+        }
+      })();
+    }, 4000);
+    return () => window.clearInterval(timer);
   }, [desktop]);
 
   async function apply(nextEnabled: boolean, nextLimit: number) {
     setBusy(true);
     setProblem(null);
-    savePref({ enabled: nextEnabled, limitBps: nextLimit });
     if (!desktop) {
       setEnabled(nextEnabled);
       setLimitBps(nextLimit);
@@ -88,9 +132,21 @@ export function HelperRelayCard() {
       setEnabled(status.enabled);
       setLimitBps(status.limitBps);
       setActive(status.active);
+      setCapable(status.capable);
+      setReachNote(status.reachNote);
+      savePref({ enabled: status.enabled, limitBps: status.limitBps });
       setAsk(false);
     } catch (error) {
       setProblem(errorText(error));
+      savePref({ enabled: false, limitBps: nextLimit });
+      try {
+        const status = await api.helperStatus();
+        setEnabled(status.enabled);
+        setCapable(status.capable);
+        setReachNote(status.reachNote);
+      } catch {
+        setEnabled(false);
+      }
     } finally {
       setBusy(false);
     }
@@ -103,14 +159,14 @@ export function HelperRelayCard() {
           <div>
             <h3 className="font-serif text-2xl font-medium tracking-tight">我来当中继</h3>
             <p className="mt-2 max-w-xl text-sm leading-6 text-muted">
-              打开后，别人卡在慢公共中继时，可以把密文流量经你转发。默认限速 1 MB/s，可随时关掉。
+              打开后，别人卡在慢公共中继时，可以把密文流量经你转发。默认限速 1 MB/s。前提是别人能直连到你——有公网地址，或已经有人打洞打到过你即可，不必自己填端口。
             </p>
           </div>
           <button
             type="button"
             role="switch"
             aria-checked={enabled}
-            disabled={busy}
+            disabled={busy || (!enabled && !capable)}
             onClick={() => {
               if (enabled) {
                 void apply(false, limitBps);
@@ -118,7 +174,7 @@ export function HelperRelayCard() {
               }
               setAsk(true);
             }}
-            className={`relative h-8 w-14 shrink-0 rounded-full transition ${enabled ? "bg-pine" : "bg-line"}`}
+            className={`relative h-8 w-14 shrink-0 rounded-full transition disabled:opacity-40 ${enabled ? "bg-pine" : "bg-line"}`}
           >
             <span
               className={`absolute top-1 size-6 rounded-full bg-card shadow transition ${enabled ? "left-7" : "left-1"}`}
@@ -149,7 +205,7 @@ export function HelperRelayCard() {
             {active > 0 ? ` · 转发中 ${active} 路` : ""}
           </p>
         ) : (
-          <p className="text-xs leading-5 text-muted">建议仅在有公网 IP，或已经做好端口映射时打开。</p>
+          <p className={`text-xs leading-5 ${capable ? "text-pine" : "text-muted"}`}>{reachNote}</p>
         )}
         {problem ? <p className="text-xs text-ember-dark">{problem}</p> : null}
         {!desktop ? <p className="text-xs text-muted">浏览器里只是预览。真正转发要在闪摊窗口里打开。</p> : null}
@@ -160,15 +216,15 @@ export function HelperRelayCard() {
           <div className="w-full max-w-md rounded-[1.4rem] border border-line bg-card p-5 shadow-lg">
             <h4 className="font-serif text-2xl">确认当互助中继？</h4>
             <p className="mt-3 text-sm leading-6 text-muted">
-              别人的流量会占用你的上行带宽和公网地址。内容仍是加密的，你看不到文件，但电费和带宽是你的。默认限速 1
-              MB/s，可随时关掉。没有公网 IP 时，别人未必找得到你。
+              别人的流量会占用你的上行。内容仍是加密的，你看不到文件。默认限速 1 MB/s，可随时关掉。打开前会再确认一次：别人现在能不能直连到你。
             </p>
+            <p className="mt-2 text-sm leading-6 text-pine">{reachNote}</p>
             <div className="mt-5 flex justify-end gap-2">
               <Button type="button" className="bg-transparent text-ink hover:bg-paper" onClick={() => setAsk(false)}>
                 先不要
               </Button>
-              <Button type="button" disabled={busy} onClick={() => void apply(true, limitBps)}>
-                {busy ? "正在打开" : "打开中继"}
+              <Button type="button" disabled={busy || !capable} onClick={() => void apply(true, limitBps)}>
+                {busy ? "正在检测" : "打开中继"}
               </Button>
             </div>
           </div>
