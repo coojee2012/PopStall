@@ -79,6 +79,7 @@ pub struct RouteStatus {
     pub relay_only: bool,
     pub via_helper: bool,
     pub helper_offers: usize,
+    pub path_label: Option<String>,
 }
 
 #[tauri::command]
@@ -88,13 +89,20 @@ pub async fn route_status(state: State<'_, AppState>) -> Result<RouteStatus, Str
             relay_only: false,
             via_helper: false,
             helper_offers: 0,
+            path_label: None,
         });
     };
     let helper = node.helper_status().await;
+    let via_helper = helper.via_helper;
     Ok(RouteStatus {
-        relay_only: node.relay_only() && !helper.via_helper,
-        via_helper: helper.via_helper,
+        relay_only: node.relay_only() && !via_helper,
+        via_helper,
         helper_offers: helper.offers,
+        path_label: if via_helper {
+            Some("互助中继（直连帮手）".to_string())
+        } else {
+            node.path_summary()
+        },
     })
 }
 
@@ -126,6 +134,28 @@ pub async fn helper_set(
     let limit = limit_bps.unwrap_or(crate::p2p::helper::DEFAULT_LIMIT_BPS);
     node.helper_set(enabled, limit).await?;
     Ok(node.helper_status().await)
+}
+
+#[tauri::command]
+pub async fn helper_list(
+    state: State<'_, AppState>,
+    exclude: Option<String>,
+) -> Result<Vec<crate::p2p::helper::HelperOffer>, String> {
+    let Some(node) = state.started_node() else {
+        return Ok(Vec::new());
+    };
+    Ok(node.helper_offers(exclude.as_deref()).await)
+}
+
+#[tauri::command]
+pub async fn use_helper(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    helper_id: String,
+) -> Result<StageInfo, String> {
+    use_helper_inner(&app, &state, helper_id)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -453,7 +483,7 @@ async fn open_connection_stage(
         return Err(err);
     }
     let traffic = state.node().await?.traffic();
-    let proxy = GuestProxy::start(connection.clone(), traffic, password).await?;
+    let proxy = GuestProxy::start(connection.clone(), traffic, password.clone()).await?;
     let label = next_stage_label();
     let proxy_url = proxy.url();
     if let Err(err) = attach_stage(app, &label, &proxy_url, proxy.port) {
@@ -464,7 +494,13 @@ async fn open_connection_stage(
     dismiss_stage(app, state).await;
     *state.stage.lock().await = Some(StageSession {
         label: label.clone(),
-        guest: Some(GuestSession { proxy, connection }),
+        guest: Some(GuestSession {
+            proxy,
+            connection,
+            endpoint_id: endpoint_id.clone(),
+            title: title.to_string(),
+            password,
+        }),
     });
     Ok(StageInfo {
         label,
@@ -472,6 +508,30 @@ async fn open_connection_stage(
         kind: "guest".to_string(),
         endpoint_id: Some(endpoint_id),
     })
+}
+
+async fn use_helper_inner(
+    app: &AppHandle,
+    state: &AppState,
+    helper_id: String,
+) -> anyhow::Result<StageInfo> {
+    let (endpoint_id, title, password) = {
+        let stage = state.stage.lock().await;
+        let Some(guest) = stage.as_ref().and_then(|stage| stage.guest.as_ref()) else {
+            anyhow::bail!("先打开一间摊，再切换互助中继");
+        };
+        (
+            guest.endpoint_id.clone(),
+            guest.title.clone(),
+            guest.password.clone(),
+        )
+    };
+    let target: iroh::EndpointId = endpoint_id
+        .parse()
+        .map_err(|_| anyhow::anyhow!("这个摊位的地址无效"))?;
+    let node = state.node().await?;
+    let connection = node.dial_helper_to(&helper_id, target).await?;
+    open_connection_stage(app, state, connection, &title, endpoint_id, password).await
 }
 
 fn normalize_password(raw: &str) -> anyhow::Result<Option<String>> {

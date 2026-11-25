@@ -46,6 +46,10 @@ pub struct HelperOffer {
     pub endpoint_id: String,
     pub limit_bps: u32,
     pub load: u8,
+    pub rtt_ms: Option<u32>,
+    pub direct: bool,
+    pub usable: bool,
+    pub note: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -61,7 +65,7 @@ pub struct HelperStatus {
 }
 
 #[derive(Clone, Debug)]
-struct LiveHelper {
+pub(crate) struct LiveHelper {
     limit_bps: u32,
     load: u8,
     expires: Instant,
@@ -79,26 +83,15 @@ impl HelperBook {
         }
     }
 
-    pub async fn list(&self, self_id: EndpointId) -> Vec<HelperOffer> {
+    pub async fn list(&self, self_id: EndpointId) -> Vec<(EndpointId, LiveHelper)> {
         let mut offers = self.offers.lock().await;
         let now = Instant::now();
         offers.retain(|_, live| live.expires > now);
-        let mut listed: Vec<HelperOffer> = offers
+        offers
             .iter()
             .filter(|(id, _)| **id != self_id)
-            .map(|(id, live)| HelperOffer {
-                endpoint_id: id.to_string(),
-                limit_bps: live.limit_bps,
-                load: live.load,
-            })
-            .collect();
-        listed.sort_by(|left, right| {
-            left.load
-                .cmp(&right.load)
-                .then(right.limit_bps.cmp(&left.limit_bps))
-                .then(left.endpoint_id.cmp(&right.endpoint_id))
-        });
-        listed
+            .map(|(id, live)| (*id, live.clone()))
+            .collect()
     }
 
     async fn ingest(&self, card: HelperCard) {
@@ -156,6 +149,33 @@ impl HelperHub {
             capable,
             reach_note,
         }
+    }
+
+    pub async fn probed_offers(&self, exclude: Option<EndpointId>) -> Vec<HelperOffer> {
+        probe_offers(&self.endpoint, &self.book, self.endpoint.id(), exclude).await
+    }
+
+    pub async fn dial_as_helper(
+        &self,
+        helper_id: EndpointId,
+        target: EndpointId,
+        routes: Arc<RouteBook>,
+    ) -> anyhow::Result<Connection> {
+        if helper_id == target {
+            anyhow::bail!("摊主自己不能给自己的摊当互助桥。需要第三方帮手，或等直连打通。");
+        }
+        let connection = tokio::time::timeout(HELPER_DIAL, dial_helper(&self.endpoint, helper_id, target))
+            .await
+            .map_err(|_| anyhow::anyhow!("互助中继连接超时"))?
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        if selected_is_relay(&connection) != Some(false) {
+            connection.close(0u8.into(), b"relay");
+            anyhow::bail!("这个帮手目前也只能走公共中继，换一个或稍后再试");
+        }
+        node::watch_paths(connection.clone(), "helper", routes);
+        self.set_via_helper(true);
+        Ok(connection)
     }
 
     pub fn set_via_helper(&self, value: bool) {
@@ -449,13 +469,12 @@ pub async fn connect_preferring_helper(
     let offers = book.list(endpoint.id()).await;
     let candidates: Vec<EndpointId> = offers
         .into_iter()
-        .filter_map(|offer| {
-            let id: EndpointId = offer.endpoint_id.parse().ok()?;
-            (id != target).then_some(id)
-        })
+        .map(|(id, _)| id)
+        .filter(|id| *id != target)
         .take(PROBE_PICKS)
         .collect();
     if candidates.is_empty() {
+        tracing::info!(%target, "没有可用的第三方互助中继（摊主自己不能桥接自己）");
         return (direct, false);
     }
     if let Some(via) = pick_helper(endpoint, target, &candidates).await {
@@ -465,6 +484,79 @@ pub async fn connect_preferring_helper(
         return (via, true);
     }
     (direct, false)
+}
+
+pub async fn probe_offers(
+    endpoint: &Endpoint,
+    book: &HelperBook,
+    self_id: EndpointId,
+    exclude: Option<EndpointId>,
+) -> Vec<HelperOffer> {
+    let raw = book.list(self_id).await;
+    let mut out = Vec::new();
+    for (id, live) in raw {
+        if exclude == Some(id) {
+            out.push(HelperOffer {
+                endpoint_id: id.to_string(),
+                limit_bps: live.limit_bps,
+                load: live.load,
+                rtt_ms: None,
+                direct: false,
+                usable: false,
+                note: "这是当前摊主，不能给自己的摊当桥".to_string(),
+            });
+            continue;
+        }
+        let started = Instant::now();
+        match tokio::time::timeout(Duration::from_secs(4), endpoint.connect(EndpointAddr::from(id), ALPN)).await
+        {
+            Ok(Ok(connection)) => {
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                let rtt_ms = started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+                let direct = selected_is_relay(&connection) == Some(false);
+                connection.close(0u8.into(), b"probe");
+                out.push(HelperOffer {
+                    endpoint_id: id.to_string(),
+                    limit_bps: live.limit_bps,
+                    load: live.load,
+                    rtt_ms: Some(rtt_ms),
+                    direct,
+                    usable: direct,
+                    note: if direct {
+                        format!("可直连 · 约 {rtt_ms} ms")
+                    } else {
+                        "连上了，但仍在走公共中继，暂不适合作帮手".to_string()
+                    },
+                });
+            }
+            Ok(Err(_)) => out.push(HelperOffer {
+                endpoint_id: id.to_string(),
+                limit_bps: live.limit_bps,
+                load: live.load,
+                rtt_ms: None,
+                direct: false,
+                usable: false,
+                note: "连不上".to_string(),
+            }),
+            Err(_) => out.push(HelperOffer {
+                endpoint_id: id.to_string(),
+                limit_bps: live.limit_bps,
+                load: live.load,
+                rtt_ms: None,
+                direct: false,
+                usable: false,
+                note: "探测超时".to_string(),
+            }),
+        }
+    }
+    out.sort_by(|left, right| {
+        right
+            .usable
+            .cmp(&left.usable)
+            .then(left.rtt_ms.unwrap_or(u32::MAX).cmp(&right.rtt_ms.unwrap_or(u32::MAX)))
+            .then(left.endpoint_id.cmp(&right.endpoint_id))
+    });
+    out
 }
 
 async fn pick_helper(

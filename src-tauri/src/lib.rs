@@ -49,6 +49,8 @@ pub fn run() {
             commands::route_status,
             commands::helper_status,
             commands::helper_set,
+            commands::helper_list,
+            commands::use_helper,
             commands::open_discovered,
             commands::place_stage_bounds,
             commands::close_stage

@@ -28,6 +28,8 @@ pub struct RouteBook {
     live: Mutex<HashMap<String, bool>>,
     /// Someone reached us on a direct path while we were the stall host.
     inbound_direct: AtomicBool,
+    /// Human label for the selected path of live connections, e.g. relay host or 直连.
+    path_labels: Mutex<HashMap<String, String>>,
 }
 
 impl RouteBook {
@@ -41,6 +43,22 @@ impl RouteBook {
         if let Ok(mut live) = self.live.lock() {
             live.remove(id);
         }
+        if let Ok(mut labels) = self.path_labels.lock() {
+            labels.remove(id);
+        }
+    }
+
+    pub fn set_path_label(&self, id: &str, label: String) {
+        if let Ok(mut labels) = self.path_labels.lock() {
+            labels.insert(id.to_string(), label);
+        }
+    }
+
+    pub fn path_summary(&self) -> Option<String> {
+        self.path_labels
+            .lock()
+            .ok()
+            .and_then(|labels| labels.values().next().cloned())
     }
 
     pub fn relay_only(&self) -> bool {
@@ -152,6 +170,38 @@ impl Node {
             return Err("互助中继还没有接上".to_string());
         };
         helper.set(enabled, limit_bps).await
+    }
+
+    pub async fn helper_offers(
+        &self,
+        exclude: Option<&str>,
+    ) -> Vec<super::helper::HelperOffer> {
+        let Some(helper) = &self.helper else {
+            return Vec::new();
+        };
+        let exclude = exclude.and_then(|raw| raw.parse().ok());
+        helper.probed_offers(exclude).await
+    }
+
+    pub async fn dial_helper_to(
+        &self,
+        helper_id: &str,
+        target: EndpointId,
+    ) -> anyhow::Result<Connection> {
+        let Some(helper) = &self.helper else {
+            anyhow::bail!("互助中继还没有接上");
+        };
+        let helper_id: EndpointId = helper_id
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("帮手地址无效"))?;
+        helper
+            .dial_as_helper(helper_id, target, self.routes.clone())
+            .await
+    }
+
+    pub fn path_summary(&self) -> Option<String> {
+        self.routes.path_summary()
     }
 
     pub fn clear_via_helper(&self) {
@@ -297,6 +347,18 @@ pub(crate) fn watch_paths(connection: Connection, role: &'static str, routes: Ar
     if role == "host" && selected_is_relay(&connection) == Some(false) {
         routes.note_inbound_direct();
     }
+    {
+        let paths = connection.paths();
+        for path in &paths {
+            if path.is_selected() {
+                routes.set_path_label(&key, path_label(path.remote_addr(), role));
+                break;
+            }
+        }
+        if role == "helper" {
+            routes.set_path_label(&key, "互助中继（直连帮手）".to_string());
+        }
+    }
     let mut relay_since = (selected_is_relay(&connection) == Some(true)).then(Instant::now);
     tokio::spawn(async move {
         let mut events = connection.path_events();
@@ -311,6 +373,7 @@ pub(crate) fn watch_paths(connection: Connection, role: &'static str, routes: Ar
                         }
                         Some(PathEvent::Selected { remote_addr, .. }) => {
                             log_path(remote, role, &remote_addr, "数据改走这条路径");
+                            routes.set_path_label(&key, path_label(&remote_addr, role));
                             if remote_addr.is_relay() {
                                 relay_since = Some(Instant::now());
                             } else {
@@ -394,6 +457,26 @@ fn path_kind(addr: &TransportAddr) -> &'static str {
         "direct"
     } else {
         "other"
+    }
+}
+
+fn path_label(addr: &TransportAddr, role: &str) -> String {
+    if role == "helper" {
+        return "互助中继（直连帮手）".to_string();
+    }
+    if addr.is_relay() {
+        let raw = addr.to_string();
+        let host = raw
+            .strip_prefix("relay:")
+            .unwrap_or(&raw)
+            .trim_end_matches('/')
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        format!("公共中继 {host}")
+    } else if addr.is_ip() {
+        "直连".to_string()
+    } else {
+        "其他路径".to_string()
     }
 }
 

@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { HelperStatus, HostInfo, PlazaSnapshot, RouteStatus, ScanReport, StageInfo, TalkSnapshot, TrafficSnapshot } from "../types/ipc";
+import type { HelperOffer, HelperStatus, HostInfo, PlazaSnapshot, RouteStatus, ScanReport, StageInfo, TalkSnapshot, TrafficSnapshot } from "../types/ipc";
 
 export function inDesktopApp(): boolean {
   return isTauri();
@@ -86,6 +86,16 @@ export function helperStatus(): Promise<HelperStatus> {
 export function helperSet(enabled: boolean, limitBps?: number): Promise<HelperStatus> {
   assertDesktop();
   return invoke("helper_set", { enabled, limitBps: limitBps ?? null });
+}
+
+export function helperList(exclude?: string): Promise<HelperOffer[]> {
+  assertDesktop();
+  return invoke("helper_list", { exclude: exclude ?? null });
+}
+
+export function useHelper(helperId: string): Promise<StageInfo> {
+  assertDesktop();
+  return invoke("use_helper", { helperId });
 }
 
 export function talkSnapshot(): Promise<TalkSnapshot> {

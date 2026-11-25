@@ -51,6 +51,17 @@ export type RouteStatus = {
   relayOnly: boolean;
   viaHelper: boolean;
   helperOffers: number;
+  pathLabel?: string | null;
+};
+
+export type HelperOffer = {
+  endpointId: string;
+  limitBps: number;
+  load: number;
+  rttMs?: number | null;
+  direct: boolean;
+  usable: boolean;
+  note: string;
 };
 
 export type HelperStatus = {

@@ -31,6 +31,9 @@ pub struct StageSession {
 pub struct GuestSession {
     pub proxy: GuestProxy,
     pub connection: Connection,
+    pub endpoint_id: String,
+    pub title: String,
+    pub password: String,
 }
 
 impl AppState {
