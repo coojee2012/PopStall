@@ -40,6 +40,8 @@ const PROBE_PICKS: usize = 3;
 const MAX_CARD_ADDRS: usize = 4;
 const ROLE_GUEST: u8 = 1;
 const ROLE_HOST: u8 = 2;
+/// Lightweight reachability check — must not open a bridge session.
+const ROLE_PROBE: u8 = 3;
 
 const TOPIC: TopicId = TopicId::from_bytes([
     0xdc, 0x3a, 0x9f, 0xdc, 0x8c, 0xfe, 0x1a, 0x46, 0xd3, 0x5f, 0xd2, 0x20, 0xd2, 0x41, 0xe3, 0x3f,
@@ -366,6 +368,13 @@ impl ProtocolHandler for HelperHandler {
             }
         };
         match hello {
+            Hello::Probe => {
+                // Write status, then wait for the client to close. Returning from
+                // accept() drops the connection and can race the status flush.
+                let _ = write_hello_status(&mut send, 0).await;
+                connection.closed().await;
+                Ok(())
+            }
             Hello::Host { session } => {
                 // Ack first so the host proceeds into serve_helper_bridge, then
                 // hand the connection to the waiting guest task.
@@ -539,6 +548,10 @@ impl ProtocolHandler for InviteHandler {
             session: parsed.session,
             addrs: parsed.addrs,
         };
+        if !claim_invite_session(invite.session) {
+            let _ = write_hello_status(&mut send, 6).await;
+            return Ok(());
+        }
         let _ = write_hello_status(&mut send, 0).await;
         let stall = self.stall.clone();
         let endpoint = self.endpoint.clone();
@@ -690,7 +703,10 @@ async fn serve_gossip(
                     refresh_helper_peers(&sender, &plaza).await;
                     answered.retain(|_, at| at.elapsed() < Duration::from_secs(120));
                     if *enabled_rx.borrow() {
-                        if !reachability_ok(&endpoint, &routes) {
+                        // Fixed listen port means the user set up router forwarding —
+                        // don't auto-disable when STUN flaps; keep advertising.
+                        let fixed_port = stored_listen_port(&listen_port).is_some();
+                        if !fixed_port && !reachability_ok(&endpoint, &routes) {
                             tracing::info!("互助中继已关闭：当前直连不到这台机器");
                             let _ = enabled.send(false);
                             continue;
@@ -708,7 +724,7 @@ async fn serve_gossip(
                             if let Some(invite) = decode_invite_gossip(&message.content, card::unix_now()) {
                                 if invite.host_id == self_id
                                     && *hosting.borrow()
-                                    && !answered.contains_key(&invite.session)
+                                    && claim_invite_session(invite.session)
                                 {
                                     answered.insert(invite.session, Instant::now());
                                     let stall = stall.clone();
@@ -813,8 +829,11 @@ pub async fn connect_preferring_helper(
     direct: Connection,
     routes: Arc<RouteBook>,
 ) -> (Connection, bool) {
-    tokio::time::sleep(PATH_WAIT).await;
-    if selected_is_relay(&direct) == Some(false) {
+    if path_looks_direct(&direct) {
+        return (direct, false);
+    }
+    // Give hole punch a short window before spending time on helpers.
+    if wait_until_direct(&direct, PATH_WAIT).await {
         return (direct, false);
     }
     let offers = book.list(endpoint.id()).await;
@@ -880,15 +899,11 @@ pub async fn probe_offers(
         // The main endpoint merges cached n0 relays and happily "connects" via relay
         // while never opening an IP path — that made refresh look stuck for 10s+.
         if !live.addrs.is_empty() {
-            match connect_ip_only(id, &live.addrs, ALPN, IP_ONLY_DIAL).await {
-                Ok(connection) => {
-                    let rtt_ms =
-                        started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+            match probe_ip_only(id, &live.addrs).await {
+                Ok(rtt_ms) => {
                     crate::netdebug::log(format!(
-                        "probe_result helper={id} mode=ip_only direct=true rtt_ms={rtt_ms} paths={}",
-                        describe_conn_paths(&connection)
+                        "probe_result helper={id} mode=ip_only direct=true rtt_ms={rtt_ms}"
                     ));
-                    connection.close(0u8.into(), b"probe");
                     out.push(HelperOffer {
                         endpoint_id: id.to_string(),
                         limit_bps: live.limit_bps,
@@ -912,7 +927,7 @@ pub async fn probe_offers(
                         direct: false,
                         usable: false,
                         note: format!(
-                            "公网 {} 直拨失败：检查端口转发/防火墙，或对方闪摊未在该端口监听",
+                            "公网 {} 直拨失败：检查端口转发/防火墙，或对方互助未开启/未在该端口监听",
                             live.addrs
                                 .first()
                                 .map(|a| a.to_string())
@@ -1174,7 +1189,9 @@ async fn ip_only_endpoint() -> anyhow::Result<Endpoint> {
             return Ok(existing.clone());
         }
     }
-    let fresh = Endpoint::builder(presets::Empty)
+    // Minimal installs the rustls CryptoProvider; Empty does not and bind() fails
+    // with "Missing or incompatible rustls crypto provider configured".
+    let fresh = Endpoint::builder(presets::Minimal)
         .secret_key(SecretKey::generate())
         .relay_mode(RelayMode::Disabled)
         .bind()
@@ -1216,6 +1233,55 @@ async fn connect_ip_only(
         describe_conn_paths(&connection)
     ));
     Ok(connection)
+}
+
+/// Connect + Probe hello so "usable" means helper is on and answering, not just
+/// that QUIC handshake completed against a closed accept handler.
+async fn probe_ip_only(id: EndpointId, addrs: &[SocketAddr]) -> anyhow::Result<u32> {
+    let started = Instant::now();
+    let connection = connect_ip_only(id, addrs, ALPN, IP_ONLY_DIAL).await?;
+    let result = async {
+        let (mut send, mut recv) = tokio::time::timeout(
+            Duration::from_secs(3),
+            connection.open_bi(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("帮手未响应探测流"))?
+        .map_err(|err| anyhow::anyhow!("打开探测流失败: {err:?}"))?;
+        write_hello_probe(&mut send).await?;
+        let status = read_hello_status(&mut recv).await?;
+        // 0 = modern helper ack. 1 = older helper rejected unknown ROLE_PROBE
+        // but still answered on this ALPN — UDP path and accept loop work.
+        if status != 0 && status != 1 {
+            anyhow::bail!("帮手拒绝探测 ({status})");
+        }
+        if status == 1 {
+            crate::netdebug::log(format!(
+                "probe_hello_legacy helper={id} status=1"
+            ));
+        }
+        Ok(started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32)
+    }
+    .await;
+    connection.close(0u8.into(), b"probe");
+    result
+}
+
+/// Deduplicate ALPN + gossip invite delivery for the same session.
+fn claim_invite_session(session: SessionId) -> bool {
+    static RECENT: OnceLock<std::sync::Mutex<HashMap<SessionId, Instant>>> = OnceLock::new();
+    let map = RECENT.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let Ok(mut guard) = map.lock() else {
+        return true;
+    };
+    guard.retain(|_, at| at.elapsed() < Duration::from_secs(120));
+    match guard.entry(session) {
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(Instant::now());
+            true
+        }
+        std::collections::hash_map::Entry::Occupied(_) => false,
+    }
 }
 
 /// Returns `(connection, known_direct)` — `known_direct` is true when the
@@ -1556,6 +1622,7 @@ enum Hello {
     Host {
         session: SessionId,
     },
+    Probe,
 }
 
 fn new_session_id() -> SessionId {
@@ -1587,6 +1654,16 @@ async fn write_hello_host(send: &mut SendStream, session: SessionId) -> anyhow::
     frame.push(2);
     frame.push(ROLE_HOST);
     frame.extend_from_slice(&session);
+    send.write_all(&frame).await?;
+    send.finish()?;
+    Ok(())
+}
+
+async fn write_hello_probe(send: &mut SendStream) -> anyhow::Result<()> {
+    let mut frame = Vec::with_capacity(4 + 1 + 1);
+    frame.extend_from_slice(HELLO_MAGIC);
+    frame.push(2);
+    frame.push(ROLE_PROBE);
     send.write_all(&frame).await?;
     send.finish()?;
     Ok(())
@@ -1627,6 +1704,12 @@ async fn read_hello(recv: &mut RecvStream) -> anyhow::Result<Hello> {
                     let mut session = [0u8; 16];
                     session.copy_from_slice(&bytes[6..22]);
                     Ok(Hello::Host { session })
+                }
+                ROLE_PROBE => {
+                    if bytes.len() != 4 + 1 + 1 {
+                        anyhow::bail!("hello 无效");
+                    }
+                    Ok(Hello::Probe)
                 }
                 _ => anyhow::bail!("hello 角色无效"),
             }
@@ -2011,5 +2094,71 @@ mod tests {
         assert!(is_globally_reachable_ip("1.1.1.1".parse().unwrap()));
         assert!(!is_globally_reachable_ip("fd12::1".parse().unwrap()));
         assert!(is_globally_reachable_ip("2001:4860:4860::8888".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn ip_only_endpoint_binds_with_rustls_provider() {
+        // Regression: presets::Empty bind fails with missing crypto provider.
+        let ep = Endpoint::builder(presets::Minimal)
+            .secret_key(SecretKey::generate())
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("Minimal + RelayMode::Disabled must bind");
+        assert!(!ep.bound_sockets().is_empty());
+        ep.close().await;
+    }
+
+    #[tokio::test]
+    async fn ip_only_probe_reaches_local_helper() {
+        use iroh::protocol::Router;
+
+        let helper_key = SecretKey::generate();
+        let helper_ep = Endpoint::builder(presets::Minimal)
+            .secret_key(helper_key)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let (enabled, _) = watch::channel(true);
+        let (invite_tx, _invite_rx) = mpsc::channel(1);
+        let handler = HelperHandler {
+            enabled: enabled.subscribe(),
+            sessions: Arc::new(Semaphore::new(MAX_SESSIONS)),
+            active: Arc::new(AtomicUsize::new(0)),
+            bandwidth: Arc::new(Mutex::new(Arc::new(BandwidthLimit::new(u64::from(
+                DEFAULT_LIMIT_BPS,
+            ))))),
+            endpoint: helper_ep.clone(),
+            rendezvous: RendezvousBook::default(),
+            invite_tx,
+            listen_port: Arc::new(AtomicU32::new(0)),
+        };
+        let router = Router::builder(helper_ep.clone())
+            .accept(ALPN, handler)
+            .spawn();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let port = helper_ep
+            .bound_sockets()
+            .into_iter()
+            .find(|socket| socket.is_ipv4())
+            .map(|socket| socket.port())
+            .expect("ipv4 bind");
+        let addrs = vec![SocketAddr::from(([127, 0, 0, 1], port))];
+        let rtt = probe_ip_only(helper_ep.id(), &addrs)
+            .await
+            .expect("loopback ip_only probe must succeed");
+        assert!(rtt < 5_000);
+
+        router.shutdown().await.ok();
+        helper_ep.close().await;
+    }
+
+    #[test]
+    fn invite_session_claim_dedups() {
+        let session = new_session_id();
+        assert!(claim_invite_session(session));
+        assert!(!claim_invite_session(session));
     }
 }
