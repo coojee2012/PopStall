@@ -157,7 +157,7 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
     };
     let mut builder = Response::builder()
         .status(status)
-        .header(header::CONTENT_TYPE, head.content_type)
+        .header(header::CONTENT_TYPE, head.content_type.clone())
         .header(header::CONTENT_SECURITY_POLICY, PROXY_CSP)
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(header::REFERRER_POLICY, "no-referrer")
@@ -174,6 +174,39 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
     if method == crate::p2p::Method::Head {
         return builder
             .body(Body::empty())
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+    // Buffer modest text/docs fully so WebView fetch()/iframe is not left with a
+    // truncated progressive body (common failure for novels and small PDFs).
+    const BUFFER_UP_TO: u64 = 8 * 1024 * 1024;
+    let should_buffer = head.content_length.is_some_and(|len| len > 0 && len <= BUFFER_UP_TO)
+        && !head.content_type.starts_with("audio/")
+        && !head.content_type.starts_with("video/");
+    if should_buffer {
+        let want = head.content_length.unwrap_or(BUFFER_UP_TO) as usize;
+        let mut buf = vec![0u8; want.min(64 * 1024)];
+        let mut body = Vec::with_capacity(want);
+        loop {
+            if body.len() >= want {
+                break;
+            }
+            let max = (want - body.len()).min(buf.len());
+            match AsyncReadExt::read(&mut recv, &mut buf[..max]).await {
+                Ok(0) => break,
+                Ok(size) => {
+                    state.traffic.record_received(size as u64);
+                    body.extend_from_slice(&buf[..size]);
+                }
+                Err(err) => {
+                    return locked(
+                        StatusCode::BAD_GATEWAY,
+                        &format!("读正文中断: {err}"),
+                    );
+                }
+            }
+        }
+        return builder
+            .body(Body::from(body))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     }
     builder

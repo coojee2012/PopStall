@@ -436,12 +436,16 @@ function renderMusic(host, all) {
     const item = all[index];
     document.getElementById("kicker").textContent = "正在打开";
     document.getElementById("track-title").textContent = item.title;
-    sub().textContent = "正在打开 " + formatSize(item.size);
+    sub().textContent = "正在接通 " + formatSize(item.size);
     audio.dataset.title = item.title;
     audio.src = item.path;
     mark();
     const play = audio.play();
-    if (play && play.catch) play.catch(() => {});
+    if (play && play.catch) {
+      play.catch((error) => {
+        sub().textContent = "播不了：" + (error && error.message ? error.message : "请再点一次");
+      });
+    }
   }
   now.querySelector("#prev").onclick = () => playAt(cursor < 0 ? 0 : cursor - 1);
   now.querySelector("#next").onclick = () => playAt(cursor < 0 ? 0 : cursor + 1);
@@ -510,11 +514,15 @@ function renderVideo(host, all) {
     cursor = index;
     const item = all[index];
     empty.hidden = true;
-    title.textContent = "正在打开 " + item.title;
+    title.textContent = "正在接通 " + item.title;
     video.src = item.path;
     mark();
     const play = video.play();
-    if (play && play.catch) play.catch(() => {});
+    if (play && play.catch) {
+      play.catch((error) => {
+        title.textContent = "播不了：" + (error && error.message ? error.message : "请再点一次");
+      });
+    }
   }
   video.addEventListener("playing", () => {
     const item = all[cursor];
@@ -608,14 +616,22 @@ async function openChapter(item, button, article, list, memoryKey) {
   localStorage.setItem(memoryKey, item.path);
   article.style.whiteSpace = "normal";
   article.textContent = "正在翻开…";
-  const response = await fetch(item.path);
-  const text = await response.text();
-  if (item.path.toLowerCase().endsWith(".txt")) {
-    article.style.whiteSpace = "pre-wrap";
-    article.textContent = text;
-    return;
+  try {
+    const response = await fetch(item.path);
+    if (!response.ok) {
+      article.textContent = "这一章打不开（" + response.status + "）。换一章或返回重进摊位。";
+      return;
+    }
+    const text = await response.text();
+    if (item.path.toLowerCase().endsWith(".txt")) {
+      article.style.whiteSpace = "pre-wrap";
+      article.textContent = text;
+      return;
+    }
+    article.innerHTML = markdown(text);
+  } catch (error) {
+    article.textContent = "这一章加载失败：" + (error && error.message ? error.message : "网络中断");
   }
-  article.innerHTML = markdown(text);
 }
 
 function markdown(raw) {

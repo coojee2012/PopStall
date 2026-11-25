@@ -8,7 +8,6 @@ use axum::body::Body;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use futures_util::stream::unfold;
 use iroh::endpoint::Connection;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, Notify, watch};
@@ -18,13 +17,22 @@ use crate::security::MAX_MEDIA_BYTES;
 
 use super::PROXY_CSP;
 
-/// One full transfer per audio or video file, written to a temporary file as it
-/// arrives. The browser's small range requests are answered from that file, so
-/// playback can start and continue without holding the whole video in memory.
+/// One P2P transfer per audio/video file, appended to a temp file while the
+/// browser plays from whatever is already on disk.
+///
+/// Responses are short byte slices (with honest Content-Length). The player
+/// issues the next Range as soon as it needs more — we never advertise a long
+/// progressive body that WebViews wait on forever, and we never block start
+/// until the whole movie finishes downloading.
 #[derive(Clone)]
 pub struct MediaHub {
     inner: Arc<HubInner>,
 }
+
+/// Bytes we want on disk past `start` before answering the first slice.
+const PRIMING: u64 = 256 * 1024;
+/// Max bytes returned in one HTTP response (keeps waits short; player re-Ranges).
+const SLICE: u64 = 1024 * 1024;
 
 struct HubInner {
     slots: Mutex<Vec<Arc<MediaSlot>>>,
@@ -139,27 +147,32 @@ impl MediaHub {
         }
 
         let total = slot.total.load(Ordering::Acquire);
+        let head = method == Method::Head;
         let parsed = range.as_deref().and_then(parse_byte_range);
+
+        // HEAD: advertise full size + Accept-Ranges so the player plans seeks
+        // without us shipping any body.
+        if head {
+            let length = if total > 0 { Some(total) } else { None };
+            return media_response(StatusCode::OK, &ctype, length, None, Body::empty(), true);
+        }
+
         match parsed {
             Some(ByteRange::Suffix { len }) => {
+                // Tail probes (duration / moov-at-end) need the finished file.
                 if let Err(err) = slot.wait_finished().await {
                     return plain(StatusCode::BAD_GATEWAY, &err);
                 }
                 let file_len = slot.downloaded();
-                let start = file_len.saturating_sub(len);
-                if file_len.saturating_sub(start) > 8 * 1024 * 1024 {
-                    return stream_range(
-                        slot,
-                        ctype,
-                        start,
-                        Some(file_len),
-                        Some(file_len),
-                        true,
-                        method == Method::Head,
+                if total > 0 && file_len < total {
+                    return plain(
+                        StatusCode::BAD_GATEWAY,
+                        &format!("影音只下到 {file_len}/{total} 字节，连接中断了"),
                     );
                 }
+                let start = file_len.saturating_sub(len.min(SLICE));
                 match slot.read_span(start, file_len).await {
-                    Ok(slice) => ranged(ctype, start, file_len, slice, method == Method::Head),
+                    Ok(slice) => ranged(ctype, start, file_len, slice, false),
                     Err(err) => plain(StatusCode::BAD_GATEWAY, &err),
                 }
             }
@@ -168,14 +181,15 @@ impl MediaHub {
                 if total > 0 && start >= total {
                     return unsatisfiable(total);
                 }
-                if end.saturating_sub(start) > 8 * 1024 * 1024 {
-                    let file_len = (total > 0).then_some(total);
-                    return stream_range(slot, ctype, start, file_len, Some(end), true, method == Method::Head);
+                // Cap each response so a huge Range does not stall start.
+                let end = end.min(start.saturating_add(SLICE));
+                if start > slot.downloaded() {
+                    return self.side_range(&target, ctype, start, end, total).await;
                 }
                 match slot.take(start, end).await {
                     Ok(slice) => {
                         let file_len = if total > 0 { total } else { slot.downloaded() };
-                        ranged(ctype, start, file_len, slice, method == Method::Head)
+                        ranged(ctype, start, file_len, slice, false)
                     }
                     Err(err) => plain(StatusCode::BAD_GATEWAY, &err),
                 }
@@ -184,13 +198,84 @@ impl MediaHub {
                 if total > 0 && start >= total {
                     return unsatisfiable(total);
                 }
-                let file_len = (total > 0).then_some(total);
-                stream_range(slot, ctype, start, file_len, file_len, true, method == Method::Head)
+                self.serve_slice(slot, ctype, start, total).await
             }
-            None => {
-                let file_len = (total > 0).then_some(total);
-                stream_range(slot, ctype, 0, file_len, file_len, false, method == Method::Head)
+            None => self.serve_slice(slot, ctype, 0, total).await,
+        }
+    }
+
+    /// Play from the growing on-disk cache: wait only for a small priming
+    /// window past `start`, then return one SLICE as 206 so the player can
+    /// Range again. Seeks past the watermark side-fetch that window.
+    async fn serve_slice(
+        &self,
+        slot: Arc<MediaSlot>,
+        ctype: String,
+        start: u64,
+        total: u64,
+    ) -> Response {
+        let end_hint = slice_end(start, total);
+        if start > slot.downloaded() {
+            return self.side_range(&slot.target, ctype, start, end_hint, total).await;
+        }
+        let prime_to = priming_end(start, total);
+        if let Err(err) = slot.wait_until(prime_to).await {
+            return plain(StatusCode::BAD_GATEWAY, &err);
+        }
+        let available = slot.downloaded();
+        if available <= start {
+            return plain(StatusCode::BAD_GATEWAY, "影音还没下到这里就断了");
+        }
+        let end = available.min(end_hint);
+        let file_len = if total > 0 { total } else { available };
+        match slot.read_span(start, end).await {
+            Ok(slice) if start == 0 && total > 0 && end >= total => media_response(
+                StatusCode::OK,
+                &ctype,
+                Some(slice.len() as u64),
+                None,
+                Body::from(slice),
+                false,
+            ),
+            Ok(slice) => ranged(ctype, start, file_len, slice, false),
+            Err(err) => plain(StatusCode::BAD_GATEWAY, &err),
+        }
+    }
+
+    /// Parallel Range pull for seeks ahead of the sequential download cursor.
+    async fn side_range(
+        &self,
+        target: &str,
+        ctype: String,
+        start: u64,
+        end: u64,
+        total: u64,
+    ) -> Response {
+        if end <= start {
+            return plain(StatusCode::BAD_GATEWAY, "无效的影音范围");
+        }
+        let last = end - 1;
+        let range = format!("bytes={start}-{last}");
+        tracing::info!(%target, %range, "影音侧拉未缓存段");
+        match fetch_host_range(
+            &self.inner.connection,
+            &self.inner.traffic,
+            &self.inner.password,
+            target,
+            &range,
+            end - start,
+        )
+        .await
+        {
+            Ok(slice) => {
+                let file_len = if total > 0 {
+                    total
+                } else {
+                    start + slice.len() as u64
+                };
+                ranged(ctype, start, file_len, slice, false)
             }
+            Err(err) => plain(StatusCode::BAD_GATEWAY, &err),
         }
     }
 
@@ -275,29 +360,33 @@ impl MediaSlot {
         }
     }
 
+    /// Block until at least `need` bytes are on disk, or the transfer ends/fails.
+    async fn wait_until(&self, need: u64) -> Result<(), String> {
+        loop {
+            if let Some(err) = self.failure().await {
+                return Err(err);
+            }
+            if self.downloaded() >= need || self.done.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            wait_notify(self).await;
+        }
+    }
+
     fn downloaded(&self) -> u64 {
         self.downloaded.load(Ordering::Acquire)
     }
 
     async fn take(&self, start: u64, end: u64) -> Result<Bytes, String> {
-        loop {
-            if let Some(err) = self.failure().await {
-                return Err(err);
-            }
-            let len = self.downloaded();
-            let done = self.done.load(Ordering::Acquire);
-            let want = if done { end.min(len) } else { end };
-            if done && start >= len {
-                return Err("请求的位置超出了文件".to_string());
-            }
-            if len >= want && want > start {
-                return self.read_span(start, want).await;
-            }
-            if done {
-                return Err("请求的位置超出了文件".to_string());
-            }
-            wait_notify(self).await;
+        if end <= start {
+            return Ok(Bytes::new());
         }
+        self.wait_until(end).await?;
+        let len = self.downloaded();
+        if start >= len {
+            return Err("请求的位置超出了文件".to_string());
+        }
+        self.read_span(start, end.min(len)).await
     }
 
     async fn read_prefix(&self, max_len: u64) -> Result<Bytes, String> {
@@ -444,68 +533,78 @@ async fn wait_notify(slot: &MediaSlot) {
     }
 }
 
-fn stream_range(
-    slot: Arc<MediaSlot>,
-    ctype: String,
-    start: u64,
-    total: Option<u64>,
-    read_end: Option<u64>,
-    partial: bool,
-    head: bool,
-) -> Response {
-    let stop = read_end.or(total);
-    let length = stop.and_then(|stop| stop.checked_sub(start));
-    let content_range = if partial {
-        Some(match stop {
-            Some(stop) if stop > start => {
-                let shown = total.map(|total| total.to_string()).unwrap_or_else(|| "*".to_string());
-                format!("bytes {start}-{}/{shown}", stop - 1)
-            }
-            _ => format!("bytes {start}-/*"),
-        })
+fn slice_end(start: u64, total: u64) -> u64 {
+    let end = start.saturating_add(SLICE);
+    if total > 0 { end.min(total) } else { end }
+}
+
+fn priming_end(start: u64, total: u64) -> u64 {
+    let end = start.saturating_add(PRIMING);
+    let end = if total > 0 { end.min(total) } else { end };
+    if end <= start {
+        slice_end(start, total).max(start.saturating_add(1))
     } else {
-        None
-    };
-    if head {
-        return media_response(
-            if partial { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK },
-            &ctype,
-            length,
-            content_range,
-            Body::empty(),
-            true,
-        );
+        end
     }
-    let body = Body::from_stream(unfold(start, move |pos| {
-        let slot = slot.clone();
-        async move {
-            loop {
-                let available = stop.unwrap_or(u64::MAX).min(slot.downloaded());
-                if pos < available {
-                    let next = (pos + 64 * 1024).min(available);
-                    match slot.read_span(pos, next).await {
-                        Ok(chunk) => return Some((Ok(chunk), next)),
-                        Err(err) => return Some((Err(std::io::Error::other(err)), pos)),
-                    }
-                }
-                if let Some(err) = slot.failed.lock().await.clone() {
-                    return Some((Err(std::io::Error::other(err)), pos));
-                }
-                if stop.is_some_and(|stop| pos >= stop) || slot.done.load(Ordering::Acquire) {
-                    return None;
-                }
-                wait_notify(&slot).await;
+}
+
+async fn fetch_host_range(
+    connection: &Connection,
+    traffic: &Traffic,
+    password: &str,
+    target: &str,
+    range: &str,
+    want: u64,
+) -> Result<Bytes, String> {
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .map_err(|err| format!("打开影音侧拉流失败: {err:?}"))?;
+    let frame = encode_request(&RequestFrame {
+        method: Method::Get,
+        target: target.to_string(),
+        range: Some(range.to_string()),
+        content_type: None,
+        body: Vec::new(),
+        pass: password.to_string(),
+    })
+    .map_err(|err| err.to_string())?;
+    traffic.record_sent(frame.len() as u64);
+    send.write_all(&frame)
+        .await
+        .map_err(|err| format!("侧拉请求失败: {err}"))?;
+    send.finish()
+        .map_err(|err| format!("结束侧拉请求失败: {err:?}"))?;
+    let head = read_response_head(&mut recv)
+        .await
+        .map_err(|err| err.to_string())?;
+    if head.status != 200 && head.status != 206 {
+        let message = recv.read_to_end(256).await.unwrap_or_default();
+        let text = String::from_utf8_lossy(&message);
+        return Err(if text.trim().is_empty() {
+            format!("侧拉失败 status={}", head.status)
+        } else {
+            text.trim().to_string()
+        });
+    }
+    let limit = want.min(SLICE).max(1) as usize;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut body = Vec::with_capacity(limit.min(64 * 1024));
+    while body.len() < limit {
+        let max = (limit - body.len()).min(buf.len());
+        match AsyncReadExt::read(&mut recv, &mut buf[..max]).await {
+            Ok(0) => break,
+            Ok(size) => {
+                traffic.record_received(size as u64);
+                body.extend_from_slice(&buf[..size]);
             }
+            Err(err) => return Err(format!("侧拉中断: {err}")),
         }
-    }));
-    media_response(
-        if partial { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK },
-        &ctype,
-        length,
-        content_range,
-        body,
-        false,
-    )
+    }
+    if body.is_empty() {
+        return Err("侧拉没有数据".to_string());
+    }
+    Ok(Bytes::from(body))
 }
 
 fn ranged(ctype: String, start: u64, total: u64, slice: Bytes, head: bool) -> Response {
@@ -581,7 +680,9 @@ fn plain(status: StatusCode, message: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{ByteRange, is_media_target, parse_byte_range};
+    use super::{
+        ByteRange, PRIMING, SLICE, is_media_target, parse_byte_range, priming_end, slice_end,
+    };
 
     #[test]
     fn recognizes_audio_and_video_names() {
@@ -600,5 +701,14 @@ mod tests {
         assert!(matches!(parse_byte_range("bytes=8-"), Some(ByteRange::Open { start: 8 })));
         assert!(matches!(parse_byte_range("bytes=-4"), Some(ByteRange::Suffix { len: 4 })));
         assert!(parse_byte_range("bytes=9-1").is_none());
+    }
+
+    #[test]
+    fn priming_and_slice_stay_short_of_full_movie() {
+        let total = 2 * 1024 * 1024 * 1024u64;
+        assert_eq!(priming_end(0, total), PRIMING);
+        assert_eq!(slice_end(0, total), SLICE);
+        assert_eq!(slice_end(total - 100, total), total);
+        assert_eq!(priming_end(total - 10, total), total);
     }
 }
