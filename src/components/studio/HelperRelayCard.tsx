@@ -11,6 +11,7 @@ export const DEFAULT_LIMIT_BPS = 1024 * 1024;
 type Pref = {
   enabled: boolean;
   limitBps: number;
+  listenPort: string;
 };
 
 const limits = [
@@ -24,15 +25,16 @@ function loadPref(): Pref {
   try {
     const raw = localStorage.getItem(PREF_KEY);
     if (!raw) {
-      return { enabled: false, limitBps: DEFAULT_LIMIT_BPS };
+      return { enabled: false, limitBps: DEFAULT_LIMIT_BPS, listenPort: "" };
     }
     const parsed = JSON.parse(raw) as Partial<Pref>;
     return {
       enabled: Boolean(parsed.enabled),
       limitBps: typeof parsed.limitBps === "number" ? parsed.limitBps : DEFAULT_LIMIT_BPS,
+      listenPort: typeof parsed.listenPort === "string" ? parsed.listenPort : "",
     };
   } catch {
-    return { enabled: false, limitBps: DEFAULT_LIMIT_BPS };
+    return { enabled: false, limitBps: DEFAULT_LIMIT_BPS, listenPort: "" };
   }
 }
 
@@ -44,10 +46,25 @@ function savePref(pref: Pref) {
   }
 }
 
+function parseListenPort(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const value = Number(trimmed);
+  if (!Number.isInteger(value) || value < 1 || value > 65535) {
+    throw new Error("端口请填 1–65535 的整数，或留空用随机端口");
+  }
+  return value;
+}
+
 export function HelperRelayCard() {
   const desktop = isTauri();
   const [enabled, setEnabled] = useState(false);
   const [limitBps, setLimitBps] = useState(DEFAULT_LIMIT_BPS);
+  const [listenPort, setListenPort] = useState("");
+  const [portNote, setPortNote] = useState("");
+  const [boundPorts, setBoundPorts] = useState<number[]>([]);
   const [active, setActive] = useState(0);
   const [capable, setCapable] = useState(false);
   const [reachNote, setReachNote] = useState("正在看这台机器能不能被直连…");
@@ -55,9 +72,23 @@ export function HelperRelayCard() {
   const [ask, setAsk] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
 
+  function syncStatus(status: Awaited<ReturnType<typeof api.helperStatus>>) {
+    setEnabled(status.enabled);
+    setLimitBps(status.limitBps);
+    setActive(status.active);
+    setCapable(status.capable);
+    setReachNote(status.reachNote);
+    setPortNote(status.portNote ?? "");
+    setBoundPorts(status.boundPorts ?? []);
+    if (status.listenPort != null && status.listenPort > 0) {
+      setListenPort(String(status.listenPort));
+    }
+  }
+
   useEffect(() => {
     const pref = loadPref();
     setLimitBps(pref.limitBps);
+    setListenPort(pref.listenPort);
     if (!desktop) {
       setEnabled(false);
       setCapable(true);
@@ -66,24 +97,34 @@ export function HelperRelayCard() {
     }
     void (async () => {
       try {
-        const status = await api.helperSet(pref.enabled, pref.limitBps);
-        setEnabled(status.enabled);
-        setLimitBps(status.limitBps);
-        setActive(status.active);
-        setCapable(status.capable);
-        setReachNote(status.reachNote);
+        let port: number | null = null;
+        try {
+          port = parseListenPort(pref.listenPort);
+        } catch (error) {
+          setProblem(errorText(error));
+          port = null;
+        }
+        const status = await api.helperSet(pref.enabled, pref.limitBps, port);
+        syncStatus(status);
+        savePref({
+          enabled: status.enabled,
+          limitBps: status.limitBps,
+          listenPort: status.listenPort ? String(status.listenPort) : pref.listenPort,
+        });
         if (pref.enabled && !status.enabled) {
-          savePref({ enabled: false, limitBps: status.limitBps });
+          savePref({
+            enabled: false,
+            limitBps: status.limitBps,
+            listenPort: status.listenPort ? String(status.listenPort) : pref.listenPort,
+          });
         }
       } catch (error) {
         setEnabled(false);
-        savePref({ enabled: false, limitBps: pref.limitBps });
+        savePref({ enabled: false, limitBps: pref.limitBps, listenPort: pref.listenPort });
         setProblem(errorText(error));
         try {
           const status = await api.helperStatus();
-          setCapable(status.capable);
-          setReachNote(status.reachNote);
-          setLimitBps(status.limitBps);
+          syncStatus(status);
         } catch {
           // Keep the error from helperSet.
         }
@@ -99,14 +140,15 @@ export function HelperRelayCard() {
       void (async () => {
         try {
           const status = await api.helperStatus();
-          setCapable(status.capable);
-          setReachNote(status.reachNote);
-          setActive(status.active);
-          setEnabled(status.enabled);
+          syncStatus(status);
           if (!status.enabled) {
             const pref = loadPref();
             if (pref.enabled) {
-              savePref({ enabled: false, limitBps: pref.limitBps });
+              savePref({
+                enabled: false,
+                limitBps: pref.limitBps,
+                listenPort: pref.listenPort,
+              });
             }
           }
         } catch {
@@ -117,33 +159,44 @@ export function HelperRelayCard() {
     return () => window.clearInterval(timer);
   }, [desktop]);
 
-  async function apply(nextEnabled: boolean, nextLimit: number) {
+  async function apply(nextEnabled: boolean, nextLimit: number, nextPortRaw: string) {
     setBusy(true);
     setProblem(null);
+    let port: number | null;
+    try {
+      port = parseListenPort(nextPortRaw);
+    } catch (error) {
+      setProblem(errorText(error));
+      setBusy(false);
+      return;
+    }
     if (!desktop) {
       setEnabled(nextEnabled);
       setLimitBps(nextLimit);
+      setListenPort(nextPortRaw.trim());
       setBusy(false);
       setAsk(false);
       return;
     }
     try {
-      const status = await api.helperSet(nextEnabled, nextLimit);
-      setEnabled(status.enabled);
-      setLimitBps(status.limitBps);
-      setActive(status.active);
-      setCapable(status.capable);
-      setReachNote(status.reachNote);
-      savePref({ enabled: status.enabled, limitBps: status.limitBps });
+      const status = await api.helperSet(nextEnabled, nextLimit, port);
+      syncStatus(status);
+      savePref({
+        enabled: status.enabled,
+        limitBps: status.limitBps,
+        listenPort: status.listenPort ? String(status.listenPort) : nextPortRaw.trim(),
+      });
       setAsk(false);
     } catch (error) {
       setProblem(errorText(error));
-      savePref({ enabled: false, limitBps: nextLimit });
+      savePref({
+        enabled: false,
+        limitBps: nextLimit,
+        listenPort: nextPortRaw.trim(),
+      });
       try {
         const status = await api.helperStatus();
-        setEnabled(status.enabled);
-        setCapable(status.capable);
-        setReachNote(status.reachNote);
+        syncStatus(status);
       } catch {
         setEnabled(false);
       }
@@ -159,7 +212,7 @@ export function HelperRelayCard() {
           <div>
             <h3 className="font-serif text-2xl font-medium tracking-tight">我来当中继</h3>
             <p className="mt-2 max-w-xl text-sm leading-6 text-muted">
-              打开后，别人卡在慢公共中继时，可以把密文流量经你转发。默认限速 1 MB/s。前提是别人能直连到你——有公网地址，或已经有人打洞打到过你即可，不必自己填端口。
+              打开后，别人卡在慢公共中继时，可以把密文流量经你转发。默认限速 1 MB/s。若路由器做了 UDP 端口转发，在下方填同一端口；改端口后需重启闪摊才会真正监听。
             </p>
           </div>
           <button
@@ -169,7 +222,7 @@ export function HelperRelayCard() {
             disabled={busy || (!enabled && !capable)}
             onClick={() => {
               if (enabled) {
-                void apply(false, limitBps);
+                void apply(false, limitBps, listenPort);
                 return;
               }
               setAsk(true);
@@ -182,6 +235,33 @@ export function HelperRelayCard() {
           </button>
         </div>
 
+        <label className="flex flex-col gap-1.5">
+          <span className="text-xs text-muted">固定 UDP 端口（可选，例如 35175）</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="text"
+              inputMode="numeric"
+              placeholder="留空则随机"
+              value={listenPort}
+              disabled={busy || enabled}
+              onChange={(event) => setListenPort(event.target.value)}
+              className="w-36 rounded-[0.9rem] border border-line bg-paper px-3 py-2 font-mono text-sm outline-none focus:border-ink disabled:opacity-50"
+            />
+            <Button
+              type="button"
+              className="px-3 py-1.5 text-xs"
+              disabled={busy || enabled}
+              onClick={() => void apply(false, limitBps, listenPort)}
+            >
+              仅保存端口
+            </Button>
+          </div>
+          {portNote ? <p className="text-xs leading-5 text-muted">{portNote}</p> : null}
+          {boundPorts.length > 0 ? (
+            <p className="font-mono text-[11px] text-muted">当前监听：{boundPorts.join(" / ")}</p>
+          ) : null}
+        </label>
+
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-muted">限速</span>
           {limits.map((item) => (
@@ -189,7 +269,7 @@ export function HelperRelayCard() {
               key={item.value}
               type="button"
               disabled={busy}
-              onClick={() => void apply(enabled, item.value)}
+              onClick={() => void apply(enabled, item.value, listenPort)}
               className={`rounded-full border px-3 py-1 text-xs transition ${
                 limitBps === item.value ? "border-ink bg-ink text-paper" : "border-line bg-card text-ink hover:border-[#d7b79a]"
               }`}
@@ -216,14 +296,17 @@ export function HelperRelayCard() {
           <div className="w-full max-w-md rounded-[1.4rem] border border-line bg-card p-5 shadow-lg">
             <h4 className="font-serif text-2xl">确认当互助中继？</h4>
             <p className="mt-3 text-sm leading-6 text-muted">
-              别人的流量会占用你的上行。内容仍是加密的，你看不到文件。默认限速 1 MB/s，可随时关掉。打开前会再确认一次：别人现在能不能直连到你。
+              别人的流量会占用你的上行。内容仍是加密的，你看不到文件。默认限速 1 MB/s，可随时关掉。
+              {listenPort.trim()
+                ? ` 将使用固定端口 ${listenPort.trim()}；若与当前监听不一致，需先重启闪摊。`
+                : " 未填固定端口时使用随机端口。"}
             </p>
             <p className="mt-2 text-sm leading-6 text-pine">{reachNote}</p>
             <div className="mt-5 flex justify-end gap-2">
               <Button type="button" className="bg-transparent text-ink hover:bg-paper" onClick={() => setAsk(false)}>
                 先不要
               </Button>
-              <Button type="button" disabled={busy || !capable} onClick={() => void apply(true, limitBps)}>
+              <Button type="button" disabled={busy || !capable} onClick={() => void apply(true, limitBps, listenPort)}>
                 {busy ? "正在检测" : "打开中继"}
               </Button>
             </div>

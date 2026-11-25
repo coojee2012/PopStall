@@ -120,6 +120,9 @@ pub async fn helper_status(
             capable: false,
             reach_note: "节点还没接上".to_string(),
             netdebug_path: crate::netdebug::path_string(),
+            listen_port: None,
+            bound_ports: Vec::new(),
+            port_note: String::new(),
         });
     };
     Ok(node.helper_status().await)
@@ -130,10 +133,11 @@ pub async fn helper_set(
     state: State<'_, AppState>,
     enabled: bool,
     limit_bps: Option<u32>,
+    listen_port: Option<u16>,
 ) -> Result<crate::p2p::helper::HelperStatus, String> {
     let node = state.node().await.map_err(|err| err.to_string())?;
     let limit = limit_bps.unwrap_or(crate::p2p::helper::DEFAULT_LIMIT_BPS);
-    node.helper_set(enabled, limit).await?;
+    node.helper_set(enabled, limit, listen_port).await?;
     Ok(node.helper_status().await)
 }
 

@@ -29,6 +29,8 @@ const MAX_SESSIONS: usize = 4;
 const CARD_TTL_SECS: u32 = 90;
 const TICK: Duration = Duration::from_secs(10);
 const PATH_WAIT: Duration = Duration::from_secs(3);
+/// Longer wait when the helper card already carries a public dial address.
+const PATH_WAIT_KNOWN: Duration = Duration::from_secs(10);
 const HELPER_DIAL: Duration = Duration::from_secs(8);
 const HOST_DIAL: Duration = Duration::from_secs(20);
 const RENDEZVOUS_WAIT: Duration = Duration::from_secs(12);
@@ -105,6 +107,11 @@ pub struct HelperStatus {
     pub capable: bool,
     pub reach_note: String,
     pub netdebug_path: String,
+    /// Preferred UDP port saved for router forwarding (`None` = ephemeral).
+    pub listen_port: Option<u16>,
+    /// Ports this process is actually bound to right now.
+    pub bound_ports: Vec<u16>,
+    pub port_note: String,
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +188,8 @@ pub struct HelperHub {
     enabled: watch::Sender<bool>,
     hosting: watch::Sender<bool>,
     limit_bps: Arc<AtomicU32>,
+    /// 0 means ephemeral / unset.
+    listen_port: Arc<AtomicU32>,
     active: Arc<AtomicUsize>,
     sessions: Arc<Semaphore>,
     bandwidth: Arc<Mutex<Arc<BandwidthLimit>>>,
@@ -190,6 +199,7 @@ pub struct HelperHub {
     endpoint: Endpoint,
     routes: Arc<RouteBook>,
     stall: StallHandler,
+    data_dir: std::path::PathBuf,
     via_helper: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -201,6 +211,9 @@ impl HelperHub {
         let via_helper = self.via_helper.load(Ordering::Relaxed);
         let offers = self.book.list(self.endpoint.id()).await.len();
         let (capable, reach_note) = reach_snapshot(&self.endpoint, &self.routes);
+        let listen_port = stored_listen_port(&self.listen_port);
+        let bound_ports = bound_udp_ports(&self.endpoint);
+        let port_note = port_status_note(listen_port, &bound_ports);
         HelperStatus {
             enabled,
             limit_bps,
@@ -210,6 +223,9 @@ impl HelperHub {
             capable,
             reach_note,
             netdebug_path: crate::netdebug::path_string(),
+            listen_port,
+            bound_ports,
+            port_note,
         }
     }
 
@@ -251,11 +267,32 @@ impl HelperHub {
         let _ = self.hosting.send(hosting);
     }
 
-    pub async fn set(&self, enabled: bool, limit_bps: u32) -> Result<(), String> {
+    pub async fn set(
+        &self,
+        enabled: bool,
+        limit_bps: u32,
+        listen_port: Option<u16>,
+    ) -> Result<(), String> {
         let limit = clamp_limit(limit_bps);
         self.limit_bps.store(limit, Ordering::Relaxed);
         *self.bandwidth.lock().await = Arc::new(BandwidthLimit::new(u64::from(limit)));
+        let port = crate::storage::helper_prefs::normalize_port(listen_port);
+        crate::storage::helper_prefs::save(
+            &self.data_dir,
+            &crate::storage::helper_prefs::HelperPrefs { listen_port: port },
+        )?;
+        self.listen_port
+            .store(u32::from(port.unwrap_or(0)), Ordering::Relaxed);
         if enabled {
+            if let Some(want) = port {
+                let bound = bound_udp_ports(&self.endpoint);
+                if !bound.contains(&want) {
+                    return Err(format!(
+                        "端口 {want} 已保存，但当前还在监听 {}。请完全退出闪摊再打开，才会按路由器转发的端口监听。",
+                        bound_ports_label(&bound)
+                    ));
+                }
+            }
             wait_reachability(&self.endpoint, &self.routes, Duration::from_secs(6)).await?;
         }
         let _ = self.enabled.send(enabled);
@@ -275,6 +312,7 @@ impl HelperHub {
             endpoint: self.endpoint.clone(),
             rendezvous: self.rendezvous.clone(),
             invite_tx: self.invite_tx.clone(),
+            listen_port: self.listen_port.clone(),
         }
     }
 
@@ -296,6 +334,7 @@ pub struct HelperHandler {
     endpoint: Endpoint,
     rendezvous: RendezvousBook,
     invite_tx: mpsc::Sender<HostInvite>,
+    listen_port: Arc<AtomicU32>,
 }
 
 impl std::fmt::Debug for HelperHandler {
@@ -374,7 +413,7 @@ impl HelperHandler {
             host_id: target,
             guest_id,
             session,
-            addrs: dialable_addrs(&self.endpoint),
+            addrs: dialable_addrs(&self.endpoint, stored_listen_port(&self.listen_port)),
         };
         let _ = self.invite_tx.try_send(invite.clone());
         tokio::spawn(notify_host_via_alpn(self.endpoint.clone(), invite));
@@ -527,11 +566,16 @@ pub fn start(
     plaza: Plaza,
     routes: Arc<RouteBook>,
     stall: StallHandler,
+    data_dir: std::path::PathBuf,
+    listen_port: Option<u16>,
 ) -> HelperHub {
     let (enabled, _) = watch::channel(false);
     let (hosting, _) = watch::channel(false);
     let (invite_tx, invite_rx) = mpsc::channel::<HostInvite>(32);
     let limit_bps = Arc::new(AtomicU32::new(DEFAULT_LIMIT_BPS));
+    let listen_port = Arc::new(AtomicU32::new(u32::from(
+        crate::storage::helper_prefs::normalize_port(listen_port).unwrap_or(0),
+    )));
     let active = Arc::new(AtomicUsize::new(0));
     let book = HelperBook::new();
     let rendezvous = RendezvousBook::default();
@@ -539,6 +583,7 @@ pub fn start(
         enabled: enabled.clone(),
         hosting: hosting.clone(),
         limit_bps: limit_bps.clone(),
+        listen_port: listen_port.clone(),
         active: active.clone(),
         sessions: Arc::new(Semaphore::new(MAX_SESSIONS)),
         bandwidth: Arc::new(Mutex::new(Arc::new(BandwidthLimit::new(u64::from(
@@ -550,6 +595,7 @@ pub fn start(
         endpoint: endpoint.clone(),
         routes: routes.clone(),
         stall: stall.clone(),
+        data_dir,
         via_helper: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let secret = endpoint.secret_key().clone();
@@ -564,6 +610,7 @@ pub fn start(
             hosting,
             invite_rx,
             limit_bps,
+            listen_port,
             active,
             book,
             routes,
@@ -584,6 +631,7 @@ async fn serve_gossip(
     hosting: watch::Sender<bool>,
     mut invite_rx: mpsc::Receiver<HostInvite>,
     limit_bps: Arc<AtomicU32>,
+    listen_port: Arc<AtomicU32>,
     active: Arc<AtomicUsize>,
     book: HelperBook,
     routes: Arc<RouteBook>,
@@ -612,7 +660,7 @@ async fn serve_gossip(
         // broadcast goes into an empty helper mesh.
         refresh_helper_peers(&sender, &plaza).await;
         if was_on {
-            broadcast_open(&sender, &secret, &limit_bps, &active, &endpoint).await;
+            broadcast_open(&sender, &secret, &limit_bps, &listen_port, &active, &endpoint).await;
         }
         loop {
             tokio::select! {
@@ -623,7 +671,7 @@ async fn serve_gossip(
                     let on = *enabled_rx.borrow();
                     if on {
                         refresh_helper_peers(&sender, &plaza).await;
-                        broadcast_open(&sender, &secret, &limit_bps, &active, &endpoint).await;
+                        broadcast_open(&sender, &secret, &limit_bps, &listen_port, &active, &endpoint).await;
                         was_on = true;
                     } else if was_on {
                         let _ = sender.broadcast(Bytes::from(encode_bye(&secret))).await;
@@ -645,7 +693,7 @@ async fn serve_gossip(
                             let _ = enabled.send(false);
                             continue;
                         }
-                        broadcast_open(&sender, &secret, &limit_bps, &active, &endpoint).await;
+                        broadcast_open(&sender, &secret, &limit_bps, &listen_port, &active, &endpoint).await;
                         was_on = true;
                     }
                 }
@@ -720,11 +768,12 @@ async fn broadcast_open(
     sender: &GossipSender,
     secret: &SecretKey,
     limit_bps: &Arc<AtomicU32>,
+    listen_port: &Arc<AtomicU32>,
     active: &Arc<AtomicUsize>,
     endpoint: &Endpoint,
 ) {
     let load = active.load(Ordering::Relaxed).min(255) as u8;
-    let addrs = dialable_addrs(endpoint);
+    let addrs = dialable_addrs(endpoint, stored_listen_port(listen_port));
     let bytes = encode_open(secret, limit_bps.load(Ordering::Relaxed), load, &addrs);
     match sender.broadcast(Bytes::from(bytes)).await {
         Ok(()) => tracing::info!(?addrs, "已广播互助中继"),
@@ -782,6 +831,14 @@ pub async fn probe_offers(
     self_id: EndpointId,
     exclude: Option<EndpointId>,
 ) -> Vec<HelperOffer> {
+    // Overlapping probes from UI timers abort path upgrades mid-flight.
+    static PROBE_GATE: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    let gate = PROBE_GATE.get_or_init(|| Mutex::new(()));
+    let Ok(_probe_guard) = gate.try_lock() else {
+        crate::netdebug::log("probe_skip reason=already_running");
+        return Vec::new();
+    };
+
     let raw = book.list(self_id).await;
     let local = format_endpoint_addr(&endpoint.addr());
     crate::netdebug::log(format!(
@@ -808,12 +865,18 @@ pub async fn probe_offers(
         }
         let started = Instant::now();
         let dial = helper_endpoint_addr(id, &live.addrs);
+        let path_wait = if live.addrs.is_empty() {
+            PATH_WAIT
+        } else {
+            PATH_WAIT_KNOWN
+        };
         crate::netdebug::log(format!(
-            "probe_dial helper={id} card_addrs={:?} dial={}",
+            "probe_dial helper={id} card_addrs={:?} dial={} path_wait_ms={}",
             live.addrs,
-            format_endpoint_addr(&dial)
+            format_endpoint_addr(&dial),
+            path_wait.as_millis()
         ));
-        match tokio::time::timeout(Duration::from_secs(8), endpoint.connect(dial, ALPN)).await
+        match tokio::time::timeout(Duration::from_secs(15), endpoint.connect(dial, ALPN)).await
         {
             Ok(Ok(connection)) => {
                 crate::netdebug::log(format!(
@@ -822,7 +885,7 @@ pub async fn probe_offers(
                     describe_conn_paths(&connection)
                 ));
                 // Hole punch often finishes after the first relay path; wait before judging.
-                let direct = wait_until_direct(&connection, PATH_WAIT).await;
+                let direct = wait_until_direct(&connection, path_wait).await;
                 let rtt_ms = started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
                 crate::netdebug::log(format!(
                     "probe_result helper={id} direct={direct} rtt_ms={rtt_ms} paths={}",
@@ -978,17 +1041,67 @@ fn is_globally_reachable_ip(ip: IpAddr) -> bool {
     }
 }
 
-fn dialable_addrs(endpoint: &Endpoint) -> Vec<SocketAddr> {
+fn dialable_addrs(endpoint: &Endpoint, force_port: Option<u16>) -> Vec<SocketAddr> {
     let mut out: Vec<SocketAddr> = endpoint
         .addr()
         .ip_addrs()
         .copied()
         .filter(|socket| is_globally_reachable_ip(socket.ip()))
+        .map(|socket| match force_port {
+            Some(port) => SocketAddr::new(socket.ip(), port),
+            None => socket,
+        })
         .collect();
     out.sort_by_key(|socket| (socket.is_ipv6(), socket.to_string()));
     out.dedup();
     out.truncate(MAX_CARD_ADDRS);
     out
+}
+
+fn stored_listen_port(listen_port: &AtomicU32) -> Option<u16> {
+    match listen_port.load(Ordering::Relaxed) {
+        0 => None,
+        port => u16::try_from(port).ok(),
+    }
+}
+
+fn bound_udp_ports(endpoint: &Endpoint) -> Vec<u16> {
+    let mut ports: Vec<u16> = endpoint
+        .bound_sockets()
+        .into_iter()
+        .map(|socket| socket.port())
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+fn bound_ports_label(ports: &[u16]) -> String {
+    if ports.is_empty() {
+        "未知端口".to_string()
+    } else {
+        ports
+            .iter()
+            .map(|port| port.to_string())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+}
+
+fn port_status_note(listen_port: Option<u16>, bound: &[u16]) -> String {
+    match listen_port {
+        None => format!(
+            "当前随机监听 UDP {}。若路由器做了固定端口转发，请在上方填写同一端口后重启闪摊。",
+            bound_ports_label(bound)
+        ),
+        Some(want) if bound.contains(&want) => {
+            format!("已按固定端口 UDP {want} 监听，请确认路由器把 UDP {want} 转到本机。")
+        }
+        Some(want) => format!(
+            "已保存端口 {want}，但当前进程仍在监听 {}。请完全退出闪摊再打开。",
+            bound_ports_label(bound)
+        ),
+    }
 }
 
 fn helper_endpoint_addr(id: EndpointId, addrs: &[SocketAddr]) -> EndpointAddr {

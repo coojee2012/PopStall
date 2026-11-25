@@ -99,10 +99,13 @@ pub struct Node {
 impl Node {
     pub async fn start(data_dir: &Path) -> anyhow::Result<Self> {
         let secret_key = load_or_create_secret_key(data_dir)?;
+        let helper_prefs = crate::storage::helper_prefs::load(data_dir);
+        let listen_port =
+            crate::storage::helper_prefs::normalize_port(helper_prefs.listen_port);
         let traffic = Arc::new(Traffic::default());
         let routes = Arc::new(RouteBook::default());
         let handler = StallHandler::new(traffic.clone(), routes.clone());
-        let endpoint = bind_endpoint(secret_key).await?;
+        let endpoint = bind_endpoint(secret_key, listen_port).await?;
         let mut router = Router::builder(endpoint.clone()).accept(ALPN, handler.clone());
         let (plaza, talk, helper) = if cfg!(test) {
             (None, None, None)
@@ -119,6 +122,8 @@ impl Node {
                 plaza.clone(),
                 routes.clone(),
                 handler.clone(),
+                data_dir.to_path_buf(),
+                listen_port,
             );
             router = router
                 .accept(super::helper::ALPN, helper.handler())
@@ -185,15 +190,23 @@ impl Node {
                 capable: false,
                 reach_note: "节点还没接上".to_string(),
                 netdebug_path: crate::netdebug::path_string(),
+                listen_port: None,
+                bound_ports: Vec::new(),
+                port_note: String::new(),
             },
         }
     }
 
-    pub async fn helper_set(&self, enabled: bool, limit_bps: u32) -> Result<(), String> {
+    pub async fn helper_set(
+        &self,
+        enabled: bool,
+        limit_bps: u32,
+        listen_port: Option<u16>,
+    ) -> Result<(), String> {
         let Some(helper) = &self.helper else {
             return Err("互助中继还没有接上".to_string());
         };
-        helper.set(enabled, limit_bps).await
+        helper.set(enabled, limit_bps, listen_port).await
     }
 
     pub async fn helper_offers(
@@ -549,22 +562,44 @@ fn endpoint_builder(secret_key: iroh::SecretKey) -> iroh::endpoint::Builder {
         .transport_config(bulk_transport())
 }
 
-async fn bind_endpoint(secret_key: iroh::SecretKey) -> anyhow::Result<Endpoint> {
+fn apply_listen_port(
+    builder: iroh::endpoint::Builder,
+    listen_port: Option<u16>,
+) -> anyhow::Result<iroh::endpoint::Builder> {
+    let Some(port) = listen_port else {
+        return Ok(builder);
+    };
+    use iroh::endpoint::BindOpts;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    tracing::info!(port, "按互助偏好绑定固定 UDP 端口");
+    let builder = builder
+        .bind_addr(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))
+        .map_err(|err| anyhow::anyhow!("绑定 UDP {port} 失败: {err}"))?
+        .bind_addr_with_opts(
+            SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
+            BindOpts::default().set_is_required(false),
+        )
+        .map_err(|err| anyhow::anyhow!("绑定 UDP IPv6 {port} 失败: {err}"))?;
+    Ok(builder)
+}
+
+async fn bind_endpoint(
+    secret_key: iroh::SecretKey,
+    listen_port: Option<u16>,
+) -> anyhow::Result<Endpoint> {
     if cfg!(test) {
-        return endpoint_builder(secret_key)
+        return apply_listen_port(endpoint_builder(secret_key), None)?
             .bind()
             .await
             .map_err(|err| anyhow::anyhow!("启动 P2P 节点失败: {err:?}"));
     }
-    match endpoint_builder(secret_key.clone())
-        .address_lookup(iroh_mainline_address_lookup::DhtAddressLookup::builder())
-        .bind()
-        .await
-    {
+    let with_dht = apply_listen_port(endpoint_builder(secret_key.clone()), listen_port)?
+        .address_lookup(iroh_mainline_address_lookup::DhtAddressLookup::builder());
+    match with_dht.bind().await {
         Ok(endpoint) => Ok(endpoint),
         Err(err) => {
             tracing::warn!(?err, "DHT address lookup did not start");
-            endpoint_builder(secret_key)
+            apply_listen_port(endpoint_builder(secret_key), listen_port)?
                 .bind()
                 .await
                 .map_err(|err| anyhow::anyhow!("启动 P2P 节点失败: {err:?}"))

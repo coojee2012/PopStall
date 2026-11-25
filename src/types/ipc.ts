@@ -73,6 +73,9 @@ export type HelperStatus = {
   capable: boolean;
   reachNote: string;
   netdebugPath?: string;
+  listenPort?: number | null;
+  boundPorts?: number[];
+  portNote?: string;
 };
 
 export type TalkLine = {

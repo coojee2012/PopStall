@@ -83,9 +83,17 @@ export function helperStatus(): Promise<HelperStatus> {
   return invoke("helper_status");
 }
 
-export function helperSet(enabled: boolean, limitBps?: number): Promise<HelperStatus> {
+export function helperSet(
+  enabled: boolean,
+  limitBps?: number,
+  listenPort?: number | null,
+): Promise<HelperStatus> {
   assertDesktop();
-  return invoke("helper_set", { enabled, limitBps: limitBps ?? null });
+  return invoke("helper_set", {
+    enabled,
+    limitBps: limitBps ?? null,
+    listenPort: listenPort ?? null,
+  });
 }
 
 export function helperList(exclude?: string): Promise<HelperOffer[]> {

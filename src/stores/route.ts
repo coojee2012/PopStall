@@ -27,8 +27,11 @@ export const useRouteStore = create<RouteState>(() => ({
 }));
 
 const AUTO_INTERVAL_MS = 45_000;
+const HELPER_REFRESH_GAP_MS = 20_000;
 let generation = 0;
 let lastAuto = 0;
+let lastHelperRefresh = 0;
+let helperRefreshInFlight: Promise<void> | null = null;
 
 export function startRoute(): () => void {
   const token = ++generation;
@@ -63,10 +66,14 @@ export function startRoute(): () => void {
       });
       const stage = useSession.getState().stage;
       const guestId = stage?.kind === "guest" ? stage.endpointId : null;
-      // Keep the 互助 list populated whenever anyone is announcing — not only on
-      // the slow-relay auto-switch path (otherwise the desk stays empty while
-      // plaza already works).
-      if (status.helperOffers > 0 || (status.relayOnly && guestId)) {
+      // Keep the 互助 list populated, but not every 2s — stacked probes abort
+      // hole-punch before a direct path can win.
+      const now = Date.now();
+      if (
+        (status.helperOffers > 0 || (status.relayOnly && guestId)) &&
+        now - lastHelperRefresh >= HELPER_REFRESH_GAP_MS
+      ) {
+        lastHelperRefresh = now;
         await refreshHelpers(guestId ?? undefined);
       }
       if (status.relayOnly && !status.viaHelper) {
@@ -97,16 +104,25 @@ export async function refreshHelpers(exclude?: string) {
   if (!isTauri()) {
     return;
   }
-  useRouteStore.setState({ probing: true, probeError: null });
-  try {
-    const helpers = await helperList(exclude);
-    useRouteStore.setState({ helpers, probing: false });
-  } catch (error) {
-    useRouteStore.setState({
-      probing: false,
-      probeError: error instanceof Error ? error.message : String(error),
-    });
+  if (helperRefreshInFlight) {
+    return helperRefreshInFlight;
   }
+  useRouteStore.setState({ probing: true, probeError: null });
+  helperRefreshInFlight = (async () => {
+    try {
+      const helpers = await helperList(exclude);
+      useRouteStore.setState({ helpers, probing: false });
+      lastHelperRefresh = Date.now();
+    } catch (error) {
+      useRouteStore.setState({
+        probing: false,
+        probeError: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      helperRefreshInFlight = null;
+    }
+  })();
+  return helperRefreshInFlight;
 }
 
 export async function switchHelper(helperId: string) {

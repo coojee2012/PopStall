@@ -32,7 +32,7 @@ export function HelperDesk() {
     void helperStatus()
       .then((status) => setNetdebugPath(status.netdebugPath ?? ""))
       .catch(() => setNetdebugPath(""));
-    const timer = window.setInterval(() => void refreshHelpers(guestId), 12_000);
+    const timer = window.setInterval(() => void refreshHelpers(guestId), 30_000);
     return () => window.clearInterval(timer);
   }, [desktop, guestId]);
 
