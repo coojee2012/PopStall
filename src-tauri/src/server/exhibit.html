@@ -430,21 +430,54 @@ function renderMusic(host, all) {
       else node.removeAttribute("aria-current");
     });
   }
-  function playAt(index) {
+  let blobUrl = "";
+  let playToken = 0;
+  function failPlay(message) {
+    document.getElementById("kicker").textContent = "播不了";
+    sub().textContent = message || "请再点一次";
+  }
+  audio.addEventListener("error", () => {
+    const code = audio.error && audio.error.code;
+    if (code === 4) failPlay("格式或响应不被支持，正在改用整段缓冲…");
+  });
+  async function playAt(index) {
     if (index < 0 || index >= all.length) return;
+    const token = ++playToken;
     cursor = index;
     const item = all[index];
     document.getElementById("kicker").textContent = "正在打开";
     document.getElementById("track-title").textContent = item.title;
     sub().textContent = "正在接通 " + formatSize(item.size);
     audio.dataset.title = item.title;
-    audio.src = item.path;
+    if (blobUrl) {
+      URL.revokeObjectURL(blobUrl);
+      blobUrl = "";
+    }
     mark();
-    const play = audio.play();
-    if (play && play.catch) {
-      play.catch((error) => {
-        sub().textContent = "播不了：" + (error && error.message ? error.message : "请再点一次");
-      });
+    try {
+      audio.src = item.path;
+      await audio.play();
+      if (token !== playToken) return;
+    } catch (error) {
+      if (token !== playToken) return;
+      sub().textContent = "直连播不了，改缓冲整首…";
+      try {
+        const res = await fetch(item.path);
+        if (token !== playToken) return;
+        if (!res.ok) throw new Error("取歌失败 " + res.status);
+        const blob = await res.blob();
+        if (token !== playToken) return;
+        blobUrl = URL.createObjectURL(blob);
+        audio.src = blobUrl;
+        await audio.play();
+      } catch (fallback) {
+        if (token !== playToken) return;
+        failPlay(
+          (fallback && fallback.message) ||
+            (error && error.message) ||
+            "请再点一次"
+        );
+      }
     }
   }
   now.querySelector("#prev").onclick = () => playAt(cursor < 0 ? 0 : cursor - 1);

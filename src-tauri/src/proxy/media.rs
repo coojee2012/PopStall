@@ -8,6 +8,7 @@ use axum::body::Body;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
+use futures_util::stream::unfold;
 use iroh::endpoint::Connection;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, Notify, watch};
@@ -133,11 +134,12 @@ impl MediaHub {
         }
         let status = StatusCode::from_u16(slot.status.load(Ordering::Acquire))
             .unwrap_or(StatusCode::BAD_GATEWAY);
-        let ctype = slot
+        let reported = slot
             .content_type
             .borrow()
             .clone()
             .unwrap_or_else(|| "application/octet-stream".to_string());
+        let ctype = media_content_type(&target, reported);
         if status != StatusCode::OK {
             if let Err(err) = slot.wait_finished().await {
                 return plain(StatusCode::BAD_GATEWAY, &err);
@@ -198,48 +200,46 @@ impl MediaHub {
                 if total > 0 && start >= total {
                     return unsatisfiable(total);
                 }
-                self.serve_slice(slot, ctype, start, total).await
+                // `bytes=N-` means "from here to EOF". Stream the growing cache as
+                // a single 206 whose Content-Range names the full resource.
+                self.serve_open_stream(slot, ctype, start, total).await
             }
-            None => self.serve_slice(slot, ctype, 0, total).await,
+            None => {
+                // WebView2 <audio src> often GETs without Range. An unsolicited
+                // 206 becomes MEDIA_ERR_SRC_NOT_SUPPORTED ("no supported source").
+                // Answer 200 and stream from the on-disk cache as it fills.
+                self.serve_full_stream(slot, ctype, total).await
+            }
         }
     }
 
-    /// Play from the growing on-disk cache: wait only for a small priming
-    /// window past `start`, then return one SLICE as 206 so the player can
-    /// Range again. Seeks past the watermark side-fetch that window.
-    async fn serve_slice(
+    async fn serve_full_stream(&self, slot: Arc<MediaSlot>, ctype: String, total: u64) -> Response {
+        if let Err(err) = slot.wait_until(priming_end(0, total)).await {
+            return plain(StatusCode::BAD_GATEWAY, &err);
+        }
+        let file_len = (total > 0).then_some(total);
+        stream_range(slot, ctype, 0, file_len, file_len, false)
+    }
+
+    async fn serve_open_stream(
         &self,
         slot: Arc<MediaSlot>,
         ctype: String,
         start: u64,
         total: u64,
     ) -> Response {
-        let end_hint = slice_end(start, total);
         if start > slot.downloaded() {
-            return self.side_range(&slot.target, ctype, start, end_hint, total).await;
+            let end = slice_end(start, total);
+            return self.side_range(&slot.target, ctype, start, end, total).await;
         }
-        let prime_to = priming_end(start, total);
-        if let Err(err) = slot.wait_until(prime_to).await {
+        if let Err(err) = slot.wait_until(priming_end(start, total)).await {
             return plain(StatusCode::BAD_GATEWAY, &err);
         }
-        let available = slot.downloaded();
-        if available <= start {
+        if slot.downloaded() <= start {
             return plain(StatusCode::BAD_GATEWAY, "影音还没下到这里就断了");
         }
-        let end = available.min(end_hint);
-        let file_len = if total > 0 { total } else { available };
-        match slot.read_span(start, end).await {
-            Ok(slice) if start == 0 && total > 0 && end >= total => media_response(
-                StatusCode::OK,
-                &ctype,
-                Some(slice.len() as u64),
-                None,
-                Body::from(slice),
-                false,
-            ),
-            Ok(slice) => ranged(ctype, start, file_len, slice, false),
-            Err(err) => plain(StatusCode::BAD_GATEWAY, &err),
-        }
+        let file_len = (total > 0).then_some(total);
+        stream_range(slot, ctype, start, file_len, file_len, true)
     }
 
     /// Parallel Range pull for seeks ahead of the sequential download cursor.
@@ -548,6 +548,91 @@ fn priming_end(start: u64, total: u64) -> u64 {
     }
 }
 
+fn media_content_type(target: &str, reported: String) -> String {
+    if reported.starts_with("audio/") || reported.starts_with("video/") {
+        return reported;
+    }
+    let path = target.split(['?', '#']).next().unwrap_or(target);
+    let ext = path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "mp3" => "audio/mpeg".into(),
+        "wav" => "audio/wav".into(),
+        "flac" => "audio/flac".into(),
+        "ogg" | "opus" => "audio/ogg".into(),
+        "m4a" | "aac" => "audio/mp4".into(),
+        "mp4" | "m4v" => "video/mp4".into(),
+        "webm" => "video/webm".into(),
+        "mov" => "video/quicktime".into(),
+        "mkv" => "video/x-matroska".into(),
+        "ogv" => "video/ogg".into(),
+        _ => reported,
+    }
+}
+
+/// Stream bytes from the growing cache. `Content-Length` is the remaining
+/// resource size when known; the body blocks until each next chunk is on disk
+/// so the player can start after PRIMING without waiting for the whole file.
+fn stream_range(
+    slot: Arc<MediaSlot>,
+    ctype: String,
+    start: u64,
+    total: Option<u64>,
+    read_end: Option<u64>,
+    partial: bool,
+) -> Response {
+    let stop = read_end.or(total);
+    let length = stop.and_then(|stop| stop.checked_sub(start));
+    let content_range = if partial {
+        Some(match stop {
+            Some(stop) if stop > start => {
+                let shown = total.map(|n| n.to_string()).unwrap_or_else(|| "*".to_string());
+                format!("bytes {start}-{}/{shown}", stop - 1)
+            }
+            _ => format!("bytes {start}-/*"),
+        })
+    } else {
+        None
+    };
+    let body = Body::from_stream(unfold(start, move |pos| {
+        let slot = slot.clone();
+        async move {
+            loop {
+                let available = stop.unwrap_or(u64::MAX).min(slot.downloaded());
+                if pos < available {
+                    let next = (pos + 64 * 1024).min(available);
+                    match slot.read_span(pos, next).await {
+                        Ok(chunk) => return Some((Ok(chunk), next)),
+                        Err(err) => return Some((Err(std::io::Error::other(err)), pos)),
+                    }
+                }
+                if let Some(err) = slot.failed.lock().await.clone() {
+                    return Some((Err(std::io::Error::other(err)), pos));
+                }
+                if stop.is_some_and(|stop| pos >= stop) || slot.done.load(Ordering::Acquire) {
+                    return None;
+                }
+                wait_notify(&slot).await;
+            }
+        }
+    }));
+    media_response(
+        if partial {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        },
+        &ctype,
+        length,
+        content_range,
+        body,
+        false,
+    )
+}
+
 async fn fetch_host_range(
     connection: &Connection,
     traffic: &Traffic,
@@ -710,5 +795,17 @@ mod tests {
         assert_eq!(slice_end(0, total), SLICE);
         assert_eq!(slice_end(total - 100, total), total);
         assert_eq!(priming_end(total - 10, total), total);
+    }
+
+    #[test]
+    fn media_content_type_fills_mp3_when_host_is_opaque() {
+        assert_eq!(
+            super::media_content_type("/media/Hallo.mp3", "application/octet-stream".into()),
+            "audio/mpeg"
+        );
+        assert_eq!(
+            super::media_content_type("/media/clip.mp4", "video/mp4".into()),
+            "video/mp4"
+        );
     }
 }
