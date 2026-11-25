@@ -113,8 +113,16 @@ impl Node {
             let plaza = super::plaza::start(endpoint.clone(), gossip.clone(), mdns);
             let talk = super::talk::start(endpoint.clone(), gossip.clone(), plaza.clone());
             router = router.accept(super::talk::ALPN, talk.handler());
-            let helper = super::helper::start(endpoint.clone(), gossip, plaza.clone(), routes.clone());
-            router = router.accept(super::helper::ALPN, helper.handler());
+            let helper = super::helper::start(
+                endpoint.clone(),
+                gossip,
+                plaza.clone(),
+                routes.clone(),
+                handler.clone(),
+            );
+            router = router
+                .accept(super::helper::ALPN, helper.handler())
+                .accept(super::helper::INVITE_ALPN, helper.invite_handler());
             (Some(plaza), Some(talk), Some(helper))
         };
         let router = router.spawn();
@@ -216,10 +224,16 @@ impl Node {
 
     pub async fn set_host(&self, target: super::HostTarget) {
         self.handler.set_host(target).await;
+        if let Some(helper) = &self.helper {
+            helper.set_hosting(true);
+        }
     }
 
     pub async fn clear_host(&self) {
         self.handler.clear_host().await;
+        if let Some(helper) = &self.helper {
+            helper.set_hosting(false);
+        }
     }
 
     pub fn announce_stall(&self, title: &str, label: &str, blurb: &str, locked: bool) {

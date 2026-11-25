@@ -11,14 +11,16 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId, PublicKey, SecretKey, Signature};
 use iroh_gossip::{Event, Gossip, GossipSender, JoinOptions, TopicId};
 use serde::Serialize;
-use tokio::sync::{watch, Mutex, Semaphore};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, Semaphore};
 
 use super::card;
 use super::node::{self, RouteBook};
 use super::plaza::Plaza;
+use super::protocol::StallHandler;
 use crate::security::BandwidthLimit;
 
 pub const ALPN: &[u8] = b"popstall/helper/1";
+pub const INVITE_ALPN: &[u8] = b"popstall/helper-invite/1";
 pub const DEFAULT_LIMIT_BPS: u32 = 1024 * 1024;
 pub const MIN_LIMIT_BPS: u32 = 512 * 1024;
 pub const MAX_LIMIT_BPS: u32 = 4 * 1024 * 1024;
@@ -29,8 +31,13 @@ const TICK: Duration = Duration::from_secs(10);
 const PATH_WAIT: Duration = Duration::from_secs(3);
 const HELPER_DIAL: Duration = Duration::from_secs(8);
 const HOST_DIAL: Duration = Duration::from_secs(20);
+const RENDEZVOUS_WAIT: Duration = Duration::from_secs(12);
+/// Guest waits for helper hello-ack through rendezvous or fallback dial.
+const HELPER_SESSION: Duration = Duration::from_secs(36);
 const PROBE_PICKS: usize = 3;
 const MAX_CARD_ADDRS: usize = 4;
+const ROLE_GUEST: u8 = 1;
+const ROLE_HOST: u8 = 2;
 
 const TOPIC: TopicId = TopicId::from_bytes([
     0xdc, 0x3a, 0x9f, 0xdc, 0x8c, 0xfe, 0x1a, 0x46, 0xd3, 0x5f, 0xd2, 0x20, 0xd2, 0x41, 0xe3, 0x3f,
@@ -39,8 +46,41 @@ const TOPIC: TopicId = TopicId::from_bytes([
 
 const CARD_MAGIC: &[u8; 4] = b"PHC1";
 const HELLO_MAGIC: &[u8; 4] = b"PHL1";
+const INVITE_MAGIC: &[u8; 4] = b"PHI1";
 const KIND_OPEN: u8 = 1;
 const KIND_BYE: u8 = 2;
+
+type SessionId = [u8; 16];
+
+#[derive(Clone, Default)]
+struct RendezvousBook {
+    waiting: Arc<Mutex<HashMap<SessionId, oneshot::Sender<Connection>>>>,
+}
+
+impl RendezvousBook {
+    async fn register(&self, session: SessionId) -> oneshot::Receiver<Connection> {
+        let (tx, rx) = oneshot::channel();
+        self.waiting.lock().await.insert(session, tx);
+        rx
+    }
+
+    async fn take(&self, session: SessionId) -> Option<oneshot::Sender<Connection>> {
+        self.waiting.lock().await.remove(&session)
+    }
+
+    async fn cancel(&self, session: SessionId) {
+        self.waiting.lock().await.remove(&session);
+    }
+}
+
+#[derive(Clone, Debug)]
+struct HostInvite {
+    helper_id: EndpointId,
+    host_id: EndpointId,
+    guest_id: EndpointId,
+    session: SessionId,
+    addrs: Vec<SocketAddr>,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -138,13 +178,17 @@ impl HelperBook {
 #[derive(Clone)]
 pub struct HelperHub {
     enabled: watch::Sender<bool>,
+    hosting: watch::Sender<bool>,
     limit_bps: Arc<AtomicU32>,
     active: Arc<AtomicUsize>,
     sessions: Arc<Semaphore>,
     bandwidth: Arc<Mutex<Arc<BandwidthLimit>>>,
     book: HelperBook,
+    rendezvous: RendezvousBook,
+    invite_tx: mpsc::Sender<HostInvite>,
     endpoint: Endpoint,
     routes: Arc<RouteBook>,
+    stall: StallHandler,
     via_helper: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -182,12 +226,12 @@ impl HelperHub {
         }
         let addrs = self.book.addrs_for(helper_id).await;
         let connection = tokio::time::timeout(
-            HELPER_DIAL,
+            HELPER_SESSION,
             dial_helper(&self.endpoint, helper_id, target, &addrs),
         )
         .await
-            .map_err(|_| anyhow::anyhow!("互助中继连接超时"))?
-            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        .map_err(|_| anyhow::anyhow!("互助中继连接超时"))?
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
         if !wait_until_direct(&connection, PATH_WAIT).await {
             connection.close(0u8.into(), b"relay");
             anyhow::bail!("这个帮手目前也只能走公共中继，换一个或稍后再试");
@@ -199,6 +243,10 @@ impl HelperHub {
 
     pub fn set_via_helper(&self, value: bool) {
         self.via_helper.store(value, Ordering::Relaxed);
+    }
+
+    pub fn set_hosting(&self, hosting: bool) {
+        let _ = self.hosting.send(hosting);
     }
 
     pub async fn set(&self, enabled: bool, limit_bps: u32) -> Result<(), String> {
@@ -223,6 +271,16 @@ impl HelperHub {
             active: self.active.clone(),
             bandwidth: self.bandwidth.clone(),
             endpoint: self.endpoint.clone(),
+            rendezvous: self.rendezvous.clone(),
+            invite_tx: self.invite_tx.clone(),
+        }
+    }
+
+    pub fn invite_handler(&self) -> InviteHandler {
+        InviteHandler {
+            hosting: self.hosting.subscribe(),
+            stall: self.stall.clone(),
+            endpoint: self.endpoint.clone(),
         }
     }
 }
@@ -234,6 +292,8 @@ pub struct HelperHandler {
     active: Arc<AtomicUsize>,
     bandwidth: Arc<Mutex<Arc<BandwidthLimit>>>,
     endpoint: Endpoint,
+    rendezvous: RendezvousBook,
+    invite_tx: mpsc::Sender<HostInvite>,
 }
 
 impl std::fmt::Debug for HelperHandler {
@@ -254,6 +314,43 @@ impl ProtocolHandler for HelperHandler {
             Ok(pair) => pair,
             Err(_) => return Ok(()),
         };
+        let hello = match read_hello(&mut recv).await {
+            Ok(hello) => hello,
+            Err(err) => {
+                tracing::debug!(%err, "helper hello rejected");
+                let _ = write_hello_status(&mut send, 1).await;
+                return Ok(());
+            }
+        };
+        match hello {
+            Hello::Host { session } => {
+                // Ack first so the host proceeds into serve_helper_bridge, then
+                // hand the connection to the waiting guest task.
+                let Some(tx) = self.rendezvous.take(session).await else {
+                    let _ = write_hello_status(&mut send, 6).await;
+                    return Ok(());
+                };
+                let _ = write_hello_status(&mut send, 0).await;
+                if tx.send(connection).is_ok() {
+                    tracing::info!("摊主已回连互助中继");
+                }
+                Ok(())
+            }
+            Hello::Guest { target, session } => {
+                self.accept_guest(connection, send, target, session).await
+            }
+        }
+    }
+}
+
+impl HelperHandler {
+    async fn accept_guest(
+        &self,
+        connection: Connection,
+        mut send: SendStream,
+        target: EndpointId,
+        session: SessionId,
+    ) -> Result<(), AcceptError> {
         let Ok(permit) = self.sessions.clone().try_acquire_owned() else {
             let _ = write_hello_status(&mut send, 5).await;
             connection.close(0u8.into(), b"busy");
@@ -264,41 +361,55 @@ impl ProtocolHandler for HelperHandler {
             active: self.active.clone(),
             _permit: permit,
         };
-        let target = match read_hello(&mut recv).await {
-            Ok(target) => target,
-            Err(err) => {
-                tracing::debug!(%err, "helper hello rejected");
-                let _ = write_hello_status(&mut send, 1).await;
-                return Ok(());
-            }
-        };
         if target == self.endpoint.id() {
             let _ = write_hello_status(&mut send, 2).await;
             return Ok(());
         }
-        let host = match tokio::time::timeout(
-            HOST_DIAL,
-            self.endpoint
-                .connect(EndpointAddr::from(target), node::ALPN),
-        )
-        .await
-        {
-            Ok(Ok(host)) => host,
-            Ok(Err(err)) => {
-                tracing::info!(%target, ?err, "helper could not reach host");
-                let _ = write_hello_status(&mut send, 3).await;
-                return Ok(());
+        let guest_id = connection.remote_id();
+        let host_rx = self.rendezvous.register(session).await;
+        let invite = HostInvite {
+            helper_id: self.endpoint.id(),
+            host_id: target,
+            guest_id,
+            session,
+            addrs: dialable_addrs(&self.endpoint),
+        };
+        let _ = self.invite_tx.try_send(invite.clone());
+        tokio::spawn(notify_host_via_alpn(self.endpoint.clone(), invite));
+
+        let host = match tokio::time::timeout(RENDEZVOUS_WAIT, host_rx).await {
+            Ok(Ok(host)) => {
+                tracing::info!(guest = %guest_id, %target, "互助汇合成功（摊主回连）");
+                host
             }
-            Err(_) => {
-                let _ = write_hello_status(&mut send, 4).await;
-                return Ok(());
+            _ => {
+                self.rendezvous.cancel(session).await;
+                tracing::info!(%target, "摊主未及时回连，改由帮手拨摊主");
+                match tokio::time::timeout(
+                    HOST_DIAL,
+                    self.endpoint
+                        .connect(EndpointAddr::from(target), node::ALPN),
+                )
+                .await
+                {
+                    Ok(Ok(host)) => host,
+                    Ok(Err(err)) => {
+                        tracing::info!(%target, ?err, "helper could not reach host");
+                        let _ = write_hello_status(&mut send, 3).await;
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        let _ = write_hello_status(&mut send, 4).await;
+                        return Ok(());
+                    }
+                }
             }
         };
         if write_hello_status(&mut send, 0).await.is_err() {
             host.close(0u8.into(), b"hello");
             return Ok(());
         }
-        tracing::info!(guest = %connection.remote_id(), %target, "互助中继会话已接通");
+        tracing::info!(guest = %guest_id, %target, "互助中继会话已接通");
         loop {
             let guest_pair = match connection.accept_bi().await {
                 Ok(pair) => pair,
@@ -320,6 +431,60 @@ impl ProtocolHandler for HelperHandler {
     }
 }
 
+#[derive(Clone)]
+pub struct InviteHandler {
+    hosting: watch::Receiver<bool>,
+    stall: StallHandler,
+    endpoint: Endpoint,
+}
+
+impl std::fmt::Debug for InviteHandler {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("InviteHandler").finish_non_exhaustive()
+    }
+}
+
+impl ProtocolHandler for InviteHandler {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        if !*self.hosting.borrow() {
+            connection.close(0u8.into(), b"idle");
+            return Ok(());
+        }
+        let (mut send, mut recv) = match connection.accept_bi().await {
+            Ok(pair) => pair,
+            Err(_) => return Ok(()),
+        };
+        let parsed = match read_invite_wire(&mut recv).await {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                tracing::debug!(%err, "helper invite rejected");
+                let _ = write_hello_status(&mut send, 1).await;
+                return Ok(());
+            }
+        };
+        if parsed.host_id != self.endpoint.id() {
+            let _ = write_hello_status(&mut send, 2).await;
+            return Ok(());
+        }
+        let invite = HostInvite {
+            helper_id: connection.remote_id(),
+            host_id: parsed.host_id,
+            guest_id: parsed.guest_id,
+            session: parsed.session,
+            addrs: parsed.addrs,
+        };
+        let _ = write_hello_status(&mut send, 0).await;
+        let stall = self.stall.clone();
+        let endpoint = self.endpoint.clone();
+        tokio::spawn(async move {
+            if let Err(err) = answer_invite(endpoint, stall, invite).await {
+                tracing::debug!(%err, "摊主回连互助失败");
+            }
+        });
+        Ok(())
+    }
+}
+
 struct SessionGuard {
     active: Arc<AtomicUsize>,
     _permit: tokio::sync::OwnedSemaphorePermit,
@@ -331,13 +496,23 @@ impl Drop for SessionGuard {
     }
 }
 
-pub fn start(endpoint: Endpoint, gossip: Gossip, plaza: Plaza, routes: Arc<RouteBook>) -> HelperHub {
+pub fn start(
+    endpoint: Endpoint,
+    gossip: Gossip,
+    plaza: Plaza,
+    routes: Arc<RouteBook>,
+    stall: StallHandler,
+) -> HelperHub {
     let (enabled, _) = watch::channel(false);
+    let (hosting, _) = watch::channel(false);
+    let (invite_tx, invite_rx) = mpsc::channel::<HostInvite>(32);
     let limit_bps = Arc::new(AtomicU32::new(DEFAULT_LIMIT_BPS));
     let active = Arc::new(AtomicUsize::new(0));
     let book = HelperBook::new();
+    let rendezvous = RendezvousBook::default();
     let hub = HelperHub {
         enabled: enabled.clone(),
+        hosting: hosting.clone(),
         limit_bps: limit_bps.clone(),
         active: active.clone(),
         sessions: Arc::new(Semaphore::new(MAX_SESSIONS)),
@@ -345,8 +520,11 @@ pub fn start(endpoint: Endpoint, gossip: Gossip, plaza: Plaza, routes: Arc<Route
             DEFAULT_LIMIT_BPS,
         ))))),
         book: book.clone(),
+        rendezvous,
+        invite_tx,
         endpoint: endpoint.clone(),
         routes: routes.clone(),
+        stall: stall.clone(),
         via_helper: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let secret = endpoint.secret_key().clone();
@@ -358,11 +536,14 @@ pub fn start(endpoint: Endpoint, gossip: Gossip, plaza: Plaza, routes: Arc<Route
             plaza,
             secret,
             enabled,
+            hosting,
+            invite_rx,
             limit_bps,
             active,
             book,
             routes,
             endpoint,
+            stall,
             self_id,
         )
         .await;
@@ -375,14 +556,18 @@ async fn serve_gossip(
     plaza: Plaza,
     secret: SecretKey,
     enabled: watch::Sender<bool>,
+    hosting: watch::Sender<bool>,
+    mut invite_rx: mpsc::Receiver<HostInvite>,
     limit_bps: Arc<AtomicU32>,
     active: Arc<AtomicUsize>,
     book: HelperBook,
     routes: Arc<RouteBook>,
     endpoint: Endpoint,
+    stall: StallHandler,
     self_id: EndpointId,
 ) {
     let mut enabled_rx = enabled.subscribe();
+    let mut answered: HashMap<SessionId, Instant> = HashMap::new();
     loop {
         let peers = plaza.peer_ids(16).await;
         let options = JoinOptions::with_bootstrap(peers).with_subscription_capacity(128);
@@ -420,8 +605,15 @@ async fn serve_gossip(
                         was_on = false;
                     }
                 }
+                Some(invite) = invite_rx.recv() => {
+                    let bytes = encode_invite_gossip(&secret, &invite);
+                    if let Err(err) = sender.broadcast(Bytes::from(bytes)).await {
+                        tracing::debug!(?err, "互助邀请 gossip 失败");
+                    }
+                }
                 _ = tick.tick() => {
                     refresh_helper_peers(&sender, &plaza).await;
+                    answered.retain(|_, at| at.elapsed() < Duration::from_secs(120));
                     if *enabled_rx.borrow() {
                         if !reachability_ok(&endpoint, &routes) {
                             tracing::info!("互助中继已关闭：当前直连不到这台机器");
@@ -438,6 +630,22 @@ async fn serve_gossip(
                     };
                     match event {
                         Ok(Event::Received(message)) => {
+                            if let Some(invite) = decode_invite_gossip(&message.content, card::unix_now()) {
+                                if invite.host_id == self_id
+                                    && *hosting.borrow()
+                                    && !answered.contains_key(&invite.session)
+                                {
+                                    answered.insert(invite.session, Instant::now());
+                                    let stall = stall.clone();
+                                    let endpoint = endpoint.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(err) = answer_invite(endpoint, stall, invite).await {
+                                            tracing::debug!(%err, "gossip 邀请回连失败");
+                                        }
+                                    });
+                                }
+                                continue;
+                            }
                             match decode_card(&message.content, card::unix_now()) {
                                 Some(HelperCard::Open { endpoint_id, .. }) if endpoint_id == self_id => {}
                                 Some(HelperCard::Bye { endpoint_id }) if endpoint_id == self_id => {}
@@ -627,7 +835,7 @@ async fn pick_helper(
     // Only a helper we can reach directly is worth using; another slow relay hop
     // does not fix the media path.
     for (id, addrs) in candidates {
-        match tokio::time::timeout(HELPER_DIAL, dial_helper(endpoint, *id, target, addrs)).await {
+        match tokio::time::timeout(HELPER_SESSION, dial_helper(endpoint, *id, target, addrs)).await {
             Ok(Ok(connection)) => {
                 if wait_until_direct(&connection, PATH_WAIT).await {
                     return Some(connection);
@@ -745,13 +953,67 @@ async fn dial_helper(
         .open_bi()
         .await
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
-    write_hello(&mut send, target).await?;
+    let session = new_session_id();
+    write_hello_guest(&mut send, target, session).await?;
     let status = read_hello_status(&mut recv).await?;
     if status != 0 {
         connection.close(0u8.into(), b"reject");
         anyhow::bail!("互助中继拒绝了这次转发 ({status})");
     }
     Ok(connection)
+}
+
+async fn notify_host_via_alpn(endpoint: Endpoint, invite: HostInvite) {
+    let Ok(Ok(connection)) = tokio::time::timeout(
+        Duration::from_secs(8),
+        endpoint.connect(EndpointAddr::from(invite.host_id), INVITE_ALPN),
+    )
+    .await
+    else {
+        return;
+    };
+    let Ok((mut send, mut recv)) = connection.open_bi().await else {
+        return;
+    };
+    if write_invite_wire(&mut send, &invite).await.is_err() {
+        return;
+    }
+    let _ = read_hello_status(&mut recv).await;
+    connection.close(0u8.into(), b"invite");
+}
+
+async fn answer_invite(
+    endpoint: Endpoint,
+    stall: StallHandler,
+    invite: HostInvite,
+) -> anyhow::Result<()> {
+    if !stall.is_hosting().await {
+        anyhow::bail!("摊位已打烊");
+    }
+    let connection = tokio::time::timeout(
+        HELPER_DIAL,
+        endpoint.connect(
+            helper_endpoint_addr(invite.helper_id, &invite.addrs),
+            ALPN,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("回连帮手超时"))?
+    .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+    write_hello_host(&mut send, invite.session).await?;
+    let status = read_hello_status(&mut recv).await?;
+    if status != 0 {
+        connection.close(0u8.into(), b"reject");
+        anyhow::bail!("帮手拒绝摊主回连 ({status})");
+    }
+    let _ = wait_until_direct(&connection, PATH_WAIT).await;
+    tracing::info!(helper = %invite.helper_id, "摊主已接到互助会话");
+    stall.serve_helper_bridge(connection).await;
+    Ok(())
 }
 
 fn selected_is_relay(connection: &Connection) -> Option<bool> {
@@ -843,23 +1105,92 @@ async fn copy_limited(
     Ok(())
 }
 
-async fn write_hello(send: &mut SendStream, target: EndpointId) -> anyhow::Result<()> {
-    let mut frame = Vec::with_capacity(4 + 1 + 32);
+#[derive(Debug)]
+enum Hello {
+    Guest {
+        target: EndpointId,
+        session: SessionId,
+    },
+    Host {
+        session: SessionId,
+    },
+}
+
+fn new_session_id() -> SessionId {
+    let bytes = SecretKey::generate().to_bytes();
+    let mut session = [0u8; 16];
+    session.copy_from_slice(&bytes[..16]);
+    session
+}
+
+async fn write_hello_guest(
+    send: &mut SendStream,
+    target: EndpointId,
+    session: SessionId,
+) -> anyhow::Result<()> {
+    let mut frame = Vec::with_capacity(4 + 1 + 1 + 32 + 16);
     frame.extend_from_slice(HELLO_MAGIC);
-    frame.push(1);
+    frame.push(2);
+    frame.push(ROLE_GUEST);
     frame.extend_from_slice(target.as_bytes());
+    frame.extend_from_slice(&session);
     send.write_all(&frame).await?;
     send.finish()?;
     Ok(())
 }
 
-async fn read_hello(recv: &mut RecvStream) -> anyhow::Result<EndpointId> {
-    let bytes = recv.read_to_end(4 + 1 + 32).await?;
-    if bytes.len() != 4 + 1 + 32 || &bytes[..4] != HELLO_MAGIC || bytes[4] != 1 {
+async fn write_hello_host(send: &mut SendStream, session: SessionId) -> anyhow::Result<()> {
+    let mut frame = Vec::with_capacity(4 + 1 + 1 + 16);
+    frame.extend_from_slice(HELLO_MAGIC);
+    frame.push(2);
+    frame.push(ROLE_HOST);
+    frame.extend_from_slice(&session);
+    send.write_all(&frame).await?;
+    send.finish()?;
+    Ok(())
+}
+
+async fn read_hello(recv: &mut RecvStream) -> anyhow::Result<Hello> {
+    let bytes = recv.read_to_end(4 + 1 + 1 + 32 + 16).await?;
+    if bytes.len() < 5 || &bytes[..4] != HELLO_MAGIC {
         anyhow::bail!("hello 无效");
     }
-    let id = PublicKey::from_bytes(bytes[5..37].try_into()?)?;
-    Ok(id)
+    match bytes[4] {
+        1 => {
+            if bytes.len() != 4 + 1 + 32 {
+                anyhow::bail!("hello 无效");
+            }
+            let target = PublicKey::from_bytes(bytes[5..37].try_into()?)?;
+            Ok(Hello::Guest {
+                target,
+                session: new_session_id(),
+            })
+        }
+        2 => {
+            let role = *bytes.get(5).ok_or_else(|| anyhow::anyhow!("hello 无效"))?;
+            match role {
+                ROLE_GUEST => {
+                    if bytes.len() != 4 + 1 + 1 + 32 + 16 {
+                        anyhow::bail!("hello 无效");
+                    }
+                    let target = PublicKey::from_bytes(bytes[6..38].try_into()?)?;
+                    let mut session = [0u8; 16];
+                    session.copy_from_slice(&bytes[38..54]);
+                    Ok(Hello::Guest { target, session })
+                }
+                ROLE_HOST => {
+                    if bytes.len() != 4 + 1 + 1 + 16 {
+                        anyhow::bail!("hello 无效");
+                    }
+                    let mut session = [0u8; 16];
+                    session.copy_from_slice(&bytes[6..22]);
+                    Ok(Hello::Host { session })
+                }
+                _ => anyhow::bail!("hello 角色无效"),
+            }
+        }
+        _ => anyhow::bail!("hello 版本无效"),
+    }
 }
 
 async fn write_hello_status(send: &mut SendStream, status: u8) -> anyhow::Result<()> {
@@ -874,6 +1205,106 @@ async fn read_hello_status(recv: &mut RecvStream) -> anyhow::Result<u8> {
         .first()
         .copied()
         .ok_or_else(|| anyhow::anyhow!("没有回应"))
+}
+
+struct InviteWire {
+    host_id: EndpointId,
+    guest_id: EndpointId,
+    session: SessionId,
+    addrs: Vec<SocketAddr>,
+}
+
+async fn write_invite_wire(send: &mut SendStream, invite: &HostInvite) -> anyhow::Result<()> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(INVITE_MAGIC);
+    frame.push(1);
+    frame.extend_from_slice(&invite.session);
+    frame.extend_from_slice(invite.host_id.as_bytes());
+    frame.extend_from_slice(invite.guest_id.as_bytes());
+    encode_addrs(&mut frame, &invite.addrs);
+    send.write_all(&frame).await?;
+    send.finish()?;
+    Ok(())
+}
+
+async fn read_invite_wire(recv: &mut RecvStream) -> anyhow::Result<InviteWire> {
+    let bytes = recv.read_to_end(256).await?;
+    if bytes.len() < 4 + 1 + 16 + 32 + 32 + 1 || &bytes[..4] != INVITE_MAGIC || bytes[4] != 1 {
+        anyhow::bail!("invite 无效");
+    }
+    let mut session = [0u8; 16];
+    session.copy_from_slice(&bytes[5..21]);
+    let host_id = PublicKey::from_bytes(bytes[21..53].try_into()?)?;
+    let guest_id = PublicKey::from_bytes(bytes[53..85].try_into()?)?;
+    let mut cursor = &bytes[85..];
+    let addrs = decode_addrs(&mut cursor).ok_or_else(|| anyhow::anyhow!("invite 地址无效"))?;
+    if !cursor.is_empty() {
+        anyhow::bail!("invite 多余字节");
+    }
+    Ok(InviteWire {
+        host_id,
+        guest_id,
+        session,
+        addrs,
+    })
+}
+
+fn encode_invite_gossip(secret: &SecretKey, invite: &HostInvite) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(INVITE_MAGIC);
+    body.push(1);
+    body.extend_from_slice(secret.public().as_bytes());
+    body.extend_from_slice(invite.host_id.as_bytes());
+    body.extend_from_slice(invite.guest_id.as_bytes());
+    body.extend_from_slice(&invite.session);
+    body.extend_from_slice(&card::unix_now().to_be_bytes());
+    encode_addrs(&mut body, &invite.addrs);
+    let signature = secret.sign(&body);
+    body.extend_from_slice(&signature.to_bytes());
+    body
+}
+
+fn decode_invite_gossip(bytes: &[u8], now: u64) -> Option<HostInvite> {
+    if bytes.len() < 4 + 1 + 32 + 32 + 32 + 16 + 8 + 1 + 64 || &bytes[..4] != INVITE_MAGIC {
+        return None;
+    }
+    let signed_len = bytes.len() - 64;
+    let signed = &bytes[..signed_len];
+    let mut cursor = &bytes[4..signed_len];
+    if *cursor.first()? != 1 {
+        return None;
+    }
+    cursor = &cursor[1..];
+    let helper_id = PublicKey::from_bytes(cursor.get(..32)?.try_into().ok()?).ok()?;
+    cursor = &cursor[32..];
+    let host_id = PublicKey::from_bytes(cursor.get(..32)?.try_into().ok()?).ok()?;
+    cursor = &cursor[32..];
+    let guest_id = PublicKey::from_bytes(cursor.get(..32)?.try_into().ok()?).ok()?;
+    cursor = &cursor[32..];
+    let mut session = [0u8; 16];
+    session.copy_from_slice(cursor.get(..16)?);
+    cursor = &cursor[16..];
+    let timestamp = u64::from_be_bytes(cursor.get(..8)?.try_into().ok()?);
+    cursor = &cursor[8..];
+    let addrs = decode_addrs(&mut cursor)?;
+    if !cursor.is_empty() {
+        return None;
+    }
+    let signature = Signature::from_bytes(bytes[signed_len..].try_into().ok()?);
+    helper_id.verify(signed, &signature).ok()?;
+    if timestamp == 0 || timestamp > now.saturating_add(180) {
+        return None;
+    }
+    if timestamp + 90 < now {
+        return None;
+    }
+    Some(HostInvite {
+        helper_id,
+        host_id,
+        guest_id,
+        session,
+        addrs,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1080,6 +1511,25 @@ mod tests {
         // Receiver "uptime" must not matter: unix time is shared.
         assert!(decode_card(&open, card::unix_now()).is_some());
         assert!(decode_card(&open, 1).is_none());
+    }
+
+    #[test]
+    fn invite_gossip_round_trips() {
+        let key = SecretKey::generate();
+        let invite = HostInvite {
+            helper_id: key.public(),
+            host_id: SecretKey::generate().public(),
+            guest_id: SecretKey::generate().public(),
+            session: new_session_id(),
+            addrs: vec!["9.8.7.6:4000".parse().unwrap()],
+        };
+        let bytes = encode_invite_gossip(&key, &invite);
+        let parsed = decode_invite_gossip(&bytes, card::unix_now()).expect("invite");
+        assert_eq!(parsed.helper_id, invite.helper_id);
+        assert_eq!(parsed.host_id, invite.host_id);
+        assert_eq!(parsed.guest_id, invite.guest_id);
+        assert_eq!(parsed.session, invite.session);
+        assert_eq!(parsed.addrs, invite.addrs);
     }
 
     #[test]

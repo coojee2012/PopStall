@@ -51,6 +51,36 @@ impl StallHandler {
     pub async fn clear_host(&self) {
         *self.target.write().await = None;
     }
+
+    pub async fn is_hosting(&self) -> bool {
+        self.target.read().await.is_some()
+    }
+
+    /// Serve stall requests arriving over a helper rendezvous bridge.
+    pub async fn serve_helper_bridge(&self, connection: Connection) {
+        let peer = connection.remote_id().to_string();
+        let stream_slots = Arc::new(Semaphore::new(MAX_STREAMS_PER_VISITOR));
+        loop {
+            let (send, recv) = match connection.accept_bi().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let target = self.target.clone();
+            let stream_slots = stream_slots.clone();
+            let bandwidth = self.bandwidth.clone();
+            let traffic = self.traffic.clone();
+            let peer = peer.clone();
+            tokio::spawn(async move {
+                if stream_slots.try_acquire_owned().is_err() {
+                    let _ = write_text(send, 503, "这个摊位的并发请求已满").await;
+                    return;
+                }
+                if let Err(err) = handle_stream(target, bandwidth, traffic, peer, send, recv).await {
+                    tracing::debug!(%err, "helper-bridge stream ended");
+                }
+            });
+        }
+    }
 }
 
 impl std::fmt::Debug for StallHandler {
