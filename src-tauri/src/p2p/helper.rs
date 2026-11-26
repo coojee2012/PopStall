@@ -1627,6 +1627,9 @@ async fn bridge(
 ) -> anyhow::Result<()> {
     let (mut guest_send, mut guest_recv) = guest;
     let (mut host_send, mut host_recv) = host;
+    // Request frames finish quickly; the stall response is written afterwards.
+    // `select!` used to cancel the downlink as soon as the uplink finished,
+    // so dual-NAT visits via a helper saw "P2P 流提前结束" before any magic.
     let up = {
         let bandwidth = bandwidth.clone();
         async move {
@@ -1640,10 +1643,9 @@ async fn bridge(
         let _ = guest_send.finish();
         Ok::<(), anyhow::Error>(())
     };
-    tokio::select! {
-        result = up => result?,
-        result = down => result?,
-    }
+    let (up_result, down_result) = tokio::join!(up, down);
+    up_result?;
+    down_result?;
     Ok(())
 }
 
@@ -2215,5 +2217,165 @@ mod tests {
         let session = new_session_id();
         assert!(claim_invite_session(session));
         assert!(!claim_invite_session(session));
+    }
+
+    /// Regression: uplink EOF must not cancel the stall response copy.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_keeps_downlink_after_request_finishes() {
+        use axum::Router;
+        use axum::routing::get;
+        use iroh::protocol::Router as IrohRouter;
+        use tokio::io::AsyncReadExt;
+
+        use crate::p2p::frame::{RequestFrame, encode_request};
+        use crate::p2p::io::read_response_head;
+        use crate::p2p::node::{ALPN as STALL_ALPN, RouteBook};
+        use crate::p2p::protocol::{HostTarget, StallHandler};
+        use crate::p2p::traffic::Traffic;
+        use crate::security::BandwidthLimit;
+
+        let host_ep = Endpoint::builder(presets::Minimal)
+            .secret_key(SecretKey::generate())
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let stall = StallHandler::new(Arc::new(Traffic::default()), Arc::new(RouteBook::default()));
+        stall
+            .set_host(HostTarget {
+                router: Router::new().route(
+                    "/",
+                    get(|| async {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        "bridge-ok"
+                    }),
+                ),
+                password: None,
+            })
+            .await;
+        let host_router = IrohRouter::builder(host_ep.clone())
+            .accept(STALL_ALPN, stall)
+            .spawn();
+
+        let helper_ep = Endpoint::builder(presets::Minimal)
+            .secret_key(SecretKey::generate())
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let host_port = host_ep
+            .bound_sockets()
+            .into_iter()
+            .find(|socket| socket.is_ipv4())
+            .unwrap()
+            .port();
+        let host_id = host_ep.id();
+        let host_addr = EndpointAddr::new(host_id)
+            .with_ip_addr(SocketAddr::from(([127, 0, 0, 1], host_port)));
+        let bandwidth = Arc::new(BandwidthLimit::new(u64::from(DEFAULT_LIMIT_BPS)));
+
+        #[derive(Debug, Clone)]
+        struct InstantBridge {
+            endpoint: Endpoint,
+            host_addr: EndpointAddr,
+            bandwidth: Arc<BandwidthLimit>,
+        }
+        impl ProtocolHandler for InstantBridge {
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                let (mut send, mut recv) = match connection.accept_bi().await {
+                    Ok(pair) => pair,
+                    Err(_) => return Ok(()),
+                };
+                let Ok(Hello::Guest { .. }) = read_hello(&mut recv).await else {
+                    let _ = write_hello_status(&mut send, 1).await;
+                    return Ok(());
+                };
+                let host = match self.endpoint.connect(self.host_addr.clone(), STALL_ALPN).await {
+                    Ok(conn) => conn,
+                    Err(_) => {
+                        let _ = write_hello_status(&mut send, 3).await;
+                        return Ok(());
+                    }
+                };
+                if write_hello_status(&mut send, 0).await.is_err() {
+                    return Ok(());
+                }
+                loop {
+                    let guest_pair = match connection.accept_bi().await {
+                        Ok(pair) => pair,
+                        Err(_) => break,
+                    };
+                    let host_pair = match host.open_bi().await {
+                        Ok(pair) => pair,
+                        Err(_) => break,
+                    };
+                    let bandwidth = self.bandwidth.clone();
+                    tokio::spawn(async move {
+                        let _ = bridge(guest_pair, host_pair, bandwidth).await;
+                    });
+                }
+                Ok(())
+            }
+        }
+
+        let helper_router = IrohRouter::builder(helper_ep.clone())
+            .accept(
+                ALPN,
+                InstantBridge {
+                    endpoint: helper_ep.clone(),
+                    host_addr,
+                    bandwidth,
+                },
+            )
+            .spawn();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let guest_ep = Endpoint::builder(presets::Minimal)
+            .secret_key(SecretKey::generate())
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let helper_port = helper_ep
+            .bound_sockets()
+            .into_iter()
+            .find(|socket| socket.is_ipv4())
+            .unwrap()
+            .port();
+        let dial = EndpointAddr::new(helper_ep.id())
+            .with_ip_addr(SocketAddr::from(([127, 0, 0, 1], helper_port)));
+        let connection = guest_ep.connect(dial, ALPN).await.expect("dial helper");
+        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        write_hello_guest(&mut send, host_id, new_session_id())
+            .await
+            .unwrap();
+        assert_eq!(read_hello_status(&mut recv).await.unwrap(), 0);
+
+        let (mut req_send, mut req_recv) = connection.open_bi().await.unwrap();
+        let frame = encode_request(&RequestFrame::get("/")).unwrap();
+        req_send.write_all(&frame).await.unwrap();
+        req_send.finish().unwrap();
+
+        let head = tokio::time::timeout(Duration::from_secs(5), read_response_head(&mut req_recv))
+            .await
+            .expect("response head timed out")
+            .expect("response head");
+        assert_eq!(head.status, 200);
+        let mut body = Vec::new();
+        AsyncReadExt::read_to_end(&mut req_recv, &mut body)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("bridge-ok"),
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+
+        connection.close(0u8.into(), b"done");
+        helper_router.shutdown().await.ok();
+        host_router.shutdown().await.ok();
+        guest_ep.close().await;
+        helper_ep.close().await;
+        host_ep.close().await;
     }
 }
