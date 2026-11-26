@@ -30,6 +30,8 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; min-height: 100%; }
+  /* Child webview: 100vh includes chrome outside the stage; use 100% of the webview. */
+  html, body { height: 100%; }
   body {
     background:
       radial-gradient(880px 380px at 0% -12%, rgba(196, 92, 38, 0.14), transparent 55%),
@@ -37,17 +39,49 @@
     color: var(--ink);
     font-family: var(--sans);
   }
-  header, main { width: min(1080px, calc(100% - 2rem)); margin: 0 auto; }
-  header { padding: 1.35rem 0 0.2rem; }
+  body[data-theme="novel"],
+  body[data-theme="document"] {
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  header, main { width: min(1200px, calc(100% - 2rem)); margin: 0 auto; }
+  header { padding: 0.7rem 0 0.15rem; flex-shrink: 0; }
+  body[data-theme="novel"] header,
+  body[data-theme="document"] header {
+    padding-top: 0.55rem;
+  }
   h1 {
-    margin: 0.2rem 0 0;
+    margin: 0.1rem 0 0;
     font-family: var(--serif);
     font-weight: 500;
-    font-size: clamp(1.8rem, 4vw, 2.7rem);
+    font-size: clamp(1.35rem, 2.6vw, 2rem);
     letter-spacing: -0.03em;
   }
-  #lede { margin: 0.35rem 0 0; color: var(--muted); line-height: 1.6; }
-  main { padding: 0.8rem 0 5rem; }
+  #lede { margin: 0.2rem 0 0; color: var(--muted); line-height: 1.5; font-size: 0.9rem; }
+  main { padding: 0.55rem 0 1.2rem; }
+  body[data-theme="novel"] main,
+  body[data-theme="document"] main {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding-bottom: 0.6rem;
+  }
+  body[data-theme="novel"] #stage,
+  body[data-theme="document"] #stage {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  body[data-theme="novel"] #stage > div,
+  body[data-theme="document"] #stage > div {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
   button, input { font: inherit; color: inherit; }
   .find {
     position: sticky;
@@ -165,22 +199,67 @@
   .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .reader {
     display: grid;
-    grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
-    gap: 1.2rem;
-    align-items: start;
+    grid-template-columns: minmax(168px, 240px) minmax(0, 1fr);
+    gap: 0.85rem;
+    align-items: stretch;
+    flex: 1;
+    min-height: 0;
+  }
+  .reader .shelf {
+    overflow: auto;
+    min-height: 0;
+    padding-right: 0.15rem;
+    border-right: 1px solid var(--line);
+  }
+  .read-pane {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    width: 100%;
+  }
+  .pager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.45rem;
+    flex-shrink: 0;
+    margin: 0 0 0.5rem;
+    padding: 0.4rem 0.55rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  .pager button {
+    border: 1px solid var(--line);
+    background: var(--paper);
+    border-radius: 999px;
+    padding: 0.3rem 0.8rem;
+    cursor: pointer;
+  }
+  .pager button:disabled { opacity: 0.4; cursor: default; }
+  .pager .page-meta {
+    min-width: 5.5rem;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
   }
   article {
-    max-width: 68ch;
-    min-height: 12rem;
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
     background: var(--card);
     border: 1px solid var(--line);
     border-radius: 1.2rem;
-    padding: clamp(1.1rem, 3vw, 2.2rem);
+    padding: clamp(1rem, 2.4vw, 1.8rem);
     box-shadow: var(--shadow);
     font-family: var(--serif);
     font-size: var(--read, 1.12rem);
     line-height: 1.95;
     overflow-wrap: anywhere;
+    max-width: 44rem;
   }
   article h2, article h3 { font-weight: 500; line-height: 1.35; }
   article pre {
@@ -192,19 +271,40 @@
     font-size: 0.86em;
     line-height: 1.5;
   }
-  .pager {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.55rem;
-    margin-top: 1.1rem;
-    padding-top: 0.9rem;
-    border-top: 1px solid var(--line);
-    color: var(--muted);
-    font-size: 0.85rem;
+  .tools { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0 0 0.55rem; flex-shrink: 0; }
+  .doc-layout {
+    display: grid;
+    grid-template-columns: minmax(168px, 240px) minmax(0, 1fr);
+    gap: 0.85rem;
+    align-items: stretch;
+    flex: 1;
+    min-height: 0;
   }
-  .pager button:disabled { opacity: 0.4; cursor: default; }
-  .tools { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0 0 0.8rem; }
+  .doc-layout .list { overflow: auto; min-height: 0; }
+  .pdf-pane {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    background: #2a241e;
+    border-radius: 1rem;
+    overflow: hidden;
+  }
+  .pdf-pane .pager { border-color: #3a3128; color: #d9cbbd; padding-left: 0.75rem; padding-right: 0.75rem; }
+  .pdf-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    display: grid;
+    place-items: start center;
+    padding: 0.75rem;
+  }
+  .pdf-scroll canvas {
+    max-width: 100%;
+    height: auto;
+    background: #fff;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  }
   iframe, embed { width: 100%; height: 78vh; border: 0; border-radius: 1rem; background: white; }
   #lightbox[hidden] { display: none; }
   #lightbox {
@@ -222,7 +322,14 @@
   #light-title { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .empty { color: var(--muted); padding: 1.5rem 0; }
   @media (max-width: 800px) {
-    .reader, .now-top { grid-template-columns: 1fr; display: grid; }
+    body[data-theme="novel"],
+    body[data-theme="document"] {
+      overflow: auto;
+    }
+    .reader, .doc-layout { grid-template-columns: 1fr; }
+    .reader .shelf, .doc-layout .list { max-height: 9rem; border-right: 0; }
+    .read-pane, .pdf-pane { min-height: 55vh; }
+    .now-top { grid-template-columns: 1fr; display: grid; }
     .photos { grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); }
   }
 </style>
@@ -650,32 +757,43 @@ function renderNovel(host, stallTitle, items) {
   tools.innerHTML = '<button type="button" id="smaller">小一点</button><button type="button" id="larger">大一点</button><button type="button" id="paper">换纸色</button>';
   const wrap = document.createElement("div");
   wrap.className = "reader";
-  const list = document.createElement("div");
-  list.className = "list";
+  const shelf = document.createElement("div");
+  shelf.className = "shelf list";
+  const pane = document.createElement("div");
+  pane.className = "read-pane";
+  const pager = document.createElement("div");
+  pager.className = "pager";
+  pager.hidden = true;
   const article = document.createElement("article");
   article.textContent = "选一个章节。";
+  pane.append(pager, article);
   const memoryKey = "popstall-chapter:" + stallTitle;
+  const pageKey = "popstall-page:" + stallTitle;
   const remembered = localStorage.getItem(memoryKey);
   let openItem = null;
   let openButton = null;
+  let active = null;
   items.forEach((item) => {
     const button = document.createElement("button");
     button.className = "row chapter";
     button.type = "button";
     button.innerHTML = '<span class="name"></span>';
     button.querySelector(".name").textContent = item.title;
-    button.addEventListener("click", () => openChapter(item, button, article, list, memoryKey));
-    list.append(button);
+    button.addEventListener("click", () => {
+      if (active && active.abort) active.abort();
+      active = openChapter(item, button, shelf, article, pager, memoryKey, pageKey);
+    });
+    shelf.append(button);
     if (!openItem && (!remembered || remembered === item.path)) {
       openItem = item;
       openButton = button;
     }
   });
-  if (!openItem && items[0] && list.firstChild) {
+  if (!openItem && items[0] && shelf.firstChild) {
     openItem = items[0];
-    openButton = list.firstChild;
+    openButton = shelf.firstChild;
   }
-  wrap.append(list, article);
+  wrap.append(shelf, pane);
   host.append(tools, wrap);
   document.getElementById("smaller").onclick = () => resize(-1);
   document.getElementById("larger").onclick = () => resize(1);
@@ -685,8 +803,21 @@ function renderNovel(host, stallTitle, items) {
     else delete document.body.dataset.paper;
     localStorage.setItem("popstall-paper", night ? "night" : "day");
   };
+  document.addEventListener("keydown", (event) => {
+    if (typing(event) || !document.getElementById("lightbox").hidden) return;
+    if (event.key === "ArrowRight" || event.key === "PageDown" || event.key === " ") {
+      event.preventDefault();
+      if (active && active.turn) active.turn(1);
+    }
+    if (event.key === "ArrowLeft" || event.key === "PageUp") {
+      event.preventDefault();
+      if (active && active.turn) active.turn(-1);
+    }
+  });
   if (openItem && openButton) {
-    queueMicrotask(() => openChapter(openItem, openButton, article, list, memoryKey));
+    queueMicrotask(() => {
+      active = openChapter(openItem, openButton, shelf, article, pager, memoryKey, pageKey);
+    });
   }
 }
 
@@ -697,7 +828,8 @@ function resize(delta) {
   localStorage.setItem("popstall-read-size", String(next));
 }
 
-const NOVEL_PAGE_CHARS = 10000;
+/** Roughly one screen of Chinese prose at default size. */
+const NOVEL_PAGE_CHARS = 1400;
 
 function decodeTextBytes(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -723,76 +855,119 @@ function decodeTextBytes(buffer) {
   return new TextDecoder("utf-8").decode(bytes);
 }
 
-function paintPagedText(article, text, page) {
-  const total = Math.max(1, Math.ceil(text.length / NOVEL_PAGE_CHARS));
-  const idx = Math.min(Math.max(0, page), total - 1);
-  const slice = text.slice(idx * NOVEL_PAGE_CHARS, (idx + 1) * NOVEL_PAGE_CHARS);
-  article.style.whiteSpace = "pre-wrap";
-  article.replaceChildren();
-  const body = document.createElement("div");
-  body.textContent = slice || "（这一页没有文字）";
-  article.append(body);
-  if (total > 1) {
-    const nav = document.createElement("div");
-    nav.className = "pager";
-    const prev = document.createElement("button");
-    prev.type = "button";
-    prev.textContent = "上一页";
-    prev.disabled = idx === 0;
-    prev.onclick = () => {
-      paintPagedText(article, text, idx - 1);
-      article.scrollIntoView({ block: "start", behavior: "smooth" });
-    };
-    const meta = document.createElement("span");
-    meta.textContent = "第 " + (idx + 1) + " / " + total + " 页";
-    const next = document.createElement("button");
-    next.type = "button";
-    next.textContent = "下一页";
-    next.disabled = idx >= total - 1;
-    next.onclick = () => {
-      paintPagedText(article, text, idx + 1);
-      article.scrollIntoView({ block: "start", behavior: "smooth" });
-    };
-    nav.append(prev, meta, next);
-    article.append(nav);
+function breakNovelPages(text) {
+  const pages = [];
+  let cursor = 0;
+  const total = text.length;
+  while (cursor < total) {
+    let end = Math.min(cursor + NOVEL_PAGE_CHARS, total);
+    if (end < total) {
+      const window = text.slice(cursor, Math.min(end + 120, total));
+      const breakAt = Math.max(
+        window.lastIndexOf("\n\n"),
+        window.lastIndexOf("。"),
+        window.lastIndexOf("！"),
+        window.lastIndexOf("？"),
+        window.lastIndexOf("\n")
+      );
+      if (breakAt > NOVEL_PAGE_CHARS * 0.55) end = cursor + breakAt + 1;
+    }
+    pages.push(text.slice(cursor, end));
+    cursor = end;
   }
+  return pages.length ? pages : [""];
 }
 
-async function openChapter(item, button, article, list, memoryKey) {
+function bindNovelPager(pager, article, pages, startPage, pageKey, path) {
+  let idx = Math.min(Math.max(0, startPage), pages.length - 1);
+  const prev = document.createElement("button");
+  prev.type = "button";
+  prev.textContent = "上一页";
+  const meta = document.createElement("span");
+  meta.className = "page-meta";
+  const next = document.createElement("button");
+  next.type = "button";
+  next.textContent = "下一页";
+  pager.replaceChildren(prev, meta, next);
+  pager.hidden = false;
+  const paint = () => {
+    article.style.whiteSpace = "pre-wrap";
+    article.textContent = pages[idx] || "（这一页没有文字）";
+    article.scrollTop = 0;
+    meta.textContent = "第 " + (idx + 1) + " / " + pages.length + " 页";
+    prev.disabled = idx <= 0;
+    next.disabled = idx >= pages.length - 1;
+    try {
+      localStorage.setItem(pageKey + ":" + path, String(idx));
+    } catch (_) {}
+  };
+  const turn = (delta) => {
+    const nextIdx = idx + delta;
+    if (nextIdx < 0 || nextIdx >= pages.length) return;
+    idx = nextIdx;
+    paint();
+  };
+  prev.onclick = () => turn(-1);
+  next.onclick = () => turn(1);
+  paint();
+  return { turn };
+}
+
+function openChapter(item, button, list, article, pager, memoryKey, pageKey) {
   list.querySelectorAll(".row").forEach((node) => node.removeAttribute("aria-current"));
   button.setAttribute("aria-current", "true");
   localStorage.setItem(memoryKey, item.path);
   article.style.whiteSpace = "normal";
   article.textContent = "正在翻开…";
-  try {
-    const response = await fetch(item.path);
-    if (!response.ok) {
-      article.textContent = "这一章打不开（" + response.status + "）。换一章或返回重进摊位。";
-      return;
+  pager.hidden = true;
+  let alive = true;
+  const handle = {
+    turn(delta) {
+      if (alive && handle._session) handle._session.turn(delta);
+    },
+    abort() {
+      alive = false;
+    },
+    _session: null,
+  };
+  (async () => {
+    try {
+      const response = await fetch(item.path);
+      if (!alive) return;
+      if (!response.ok) {
+        article.textContent = "这一章打不开（" + response.status + "）。换一章或返回重进摊位。";
+        return;
+      }
+      const buffer = await response.arrayBuffer();
+      if (!alive) return;
+      if (!buffer.byteLength) {
+        article.textContent = "这一章是空的。";
+        return;
+      }
+      const text = decodeTextBytes(buffer).replace(/^\uFEFF/, "");
+      if (!text.trim()) {
+        article.textContent = "解出来没有可读文字。若是扫描版，请改用文档主题看 PDF。";
+        return;
+      }
+      const lower = item.path.toLowerCase().split(/[?#]/)[0];
+      const usePages = lower.endsWith(".txt") || text.length > NOVEL_PAGE_CHARS * 2;
+      if (usePages) {
+        const pages = breakNovelPages(text);
+        let start = 0;
+        try {
+          start = Number(localStorage.getItem(pageKey + ":" + item.path) || "0") || 0;
+        } catch (_) {}
+        handle._session = bindNovelPager(pager, article, pages, start, pageKey, item.path);
+        return;
+      }
+      pager.hidden = true;
+      article.innerHTML = markdown(text);
+    } catch (error) {
+      if (!alive) return;
+      article.textContent = "这一章加载失败：" + (error && error.message ? error.message : "网络中断");
     }
-    const buffer = await response.arrayBuffer();
-    if (!buffer.byteLength) {
-      article.textContent = "这一章是空的。";
-      return;
-    }
-    const text = decodeTextBytes(buffer).replace(/^\uFEFF/, "");
-    if (!text.trim()) {
-      article.textContent = "解出来没有可读文字。若是扫描版，请改用文档主题看 PDF。";
-      return;
-    }
-    const lower = item.path.toLowerCase().split(/[?#]/)[0];
-    if (lower.endsWith(".txt")) {
-      paintPagedText(article, text, 0);
-      return;
-    }
-    if (text.length > NOVEL_PAGE_CHARS * 3) {
-      paintPagedText(article, text, 0);
-      return;
-    }
-    article.innerHTML = markdown(text);
-  } catch (error) {
-    article.textContent = "这一章加载失败：" + (error && error.message ? error.message : "网络中断");
-  }
+  })();
+  return handle;
 }
 
 function markdown(raw) {
@@ -839,27 +1014,85 @@ function inline(value) {
     .replace(/\[([^\]]+)\]\((\/[^)\s]*)\)/g, '<a href="$2">$1</a>');
 }
 
+let pdfjsLib = null;
+async function loadPdfjs() {
+  if (pdfjsLib) return pdfjsLib;
+  pdfjsLib = await import("/_stall/pdfjs/pdf.min.mjs");
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "/_stall/pdfjs/pdf.worker.min.mjs";
+  return pdfjsLib;
+}
+
 function renderDocs(host, items) {
+  const layout = document.createElement("div");
+  layout.className = "doc-layout";
   const list = document.createElement("div");
   list.className = "list";
-  const frame = document.createElement("iframe");
-  frame.hidden = true;
+  const pane = document.createElement("div");
+  pane.className = "pdf-pane";
+  pane.hidden = true;
+  const pager = document.createElement("div");
+  pager.className = "pager";
+  const scroll = document.createElement("div");
+  scroll.className = "pdf-scroll";
+  const canvas = document.createElement("canvas");
+  scroll.append(canvas);
+  pane.append(pager, scroll);
   const status = document.createElement("p");
   status.className = "empty";
-  status.hidden = true;
-  let blobUrl = "";
+  status.textContent = "选一份文档打开。";
   let openToken = 0;
+  let pdfDoc = null;
+  let pageNo = 1;
+  const prev = document.createElement("button");
+  prev.type = "button";
+  prev.textContent = "上一页";
+  const meta = document.createElement("span");
+  meta.className = "page-meta";
+  const next = document.createElement("button");
+  next.type = "button";
+  next.textContent = "下一页";
+  pager.append(prev, meta, next);
+
+  async function paintPdfPage() {
+    if (!pdfDoc) return;
+    const page = await pdfDoc.getPage(pageNo);
+    const base = page.getViewport({ scale: 1 });
+    const width = Math.max(320, scroll.clientWidth - 24);
+    const scale = width / base.width;
+    const viewport = page.getViewport({ scale: Math.min(scale, 2.2) });
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = Math.floor(viewport.width * ratio);
+    canvas.height = Math.floor(viewport.height * ratio);
+    canvas.style.width = Math.floor(viewport.width) + "px";
+    canvas.style.height = Math.floor(viewport.height) + "px";
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    meta.textContent = pageNo + " / " + pdfDoc.numPages;
+    prev.disabled = pageNo <= 1;
+    next.disabled = pageNo >= pdfDoc.numPages;
+    scroll.scrollTop = 0;
+  }
+
+  prev.onclick = () => {
+    if (pageNo <= 1) return;
+    pageNo -= 1;
+    void paintPdfPage();
+  };
+  next.onclick = () => {
+    if (!pdfDoc || pageNo >= pdfDoc.numPages) return;
+    pageNo += 1;
+    void paintPdfPage();
+  };
+
   async function openDoc(item, button) {
     const token = ++openToken;
     list.querySelectorAll(".row").forEach((node) => node.removeAttribute("aria-current"));
     button.setAttribute("aria-current", "true");
-    frame.hidden = true;
+    pane.hidden = true;
     status.hidden = false;
-    status.textContent = "正在打开 " + item.title + "…";
-    if (blobUrl) {
-      URL.revokeObjectURL(blobUrl);
-      blobUrl = "";
-    }
+    status.textContent = "正在拉取 " + item.title + "（" + formatSize(item.size) + "）…";
+    pdfDoc = null;
     try {
       const res = await fetch(item.path);
       if (token !== openToken) return;
@@ -867,25 +1100,27 @@ function renderDocs(host, items) {
         const detail = (await res.text()).trim().slice(0, 160);
         throw new Error(detail || ("打开失败 " + res.status));
       }
-      const raw = await res.blob();
+      const buffer = await res.arrayBuffer();
       if (token !== openToken) return;
-      if (!raw.size) throw new Error("文件是空的");
-      const typed = raw.type && raw.type !== "application/octet-stream"
-        ? raw
-        : new Blob([raw], { type: "application/pdf" });
-      blobUrl = URL.createObjectURL(typed);
-      frame.title = item.title;
-      frame.src = blobUrl;
-      frame.hidden = false;
+      if (!buffer.byteLength) throw new Error("文件是空的");
+      status.textContent = "正在排版 PDF…";
+      const pdfjs = await loadPdfjs();
+      if (token !== openToken) return;
+      const task = pdfjs.getDocument({ data: new Uint8Array(buffer) });
+      pdfDoc = await task.promise;
+      if (token !== openToken) return;
+      pageNo = 1;
+      pane.hidden = false;
       status.hidden = true;
+      await paintPdfPage();
     } catch (error) {
       if (token !== openToken) return;
-      frame.removeAttribute("src");
-      frame.hidden = true;
+      pane.hidden = true;
       status.hidden = false;
       status.textContent = (error && error.message) || "这份文档打不开";
     }
   }
+
   items.forEach((item, index) => {
     const button = document.createElement("button");
     button.className = "row";
@@ -897,7 +1132,8 @@ function renderDocs(host, items) {
     list.append(button);
     if (items.length === 1) openDoc(item, button);
   });
-  host.append(list, status, frame);
+  layout.append(list, pane);
+  host.append(layout, status);
 }
 
 function typing(event) {

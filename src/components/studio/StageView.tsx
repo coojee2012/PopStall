@@ -36,10 +36,15 @@ export function StageView() {
     const observer = new ResizeObserver(place);
     observer.observe(element);
     window.addEventListener("resize", place);
+    // macOS fullscreen changes size without always firing a useful resize first.
+    document.addEventListener("fullscreenchange", place);
+    window.addEventListener("orientationchange", place);
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener("resize", place);
+      document.removeEventListener("fullscreenchange", place);
+      window.removeEventListener("orientationchange", place);
     };
   }, [stage]);
 

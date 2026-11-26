@@ -231,6 +231,9 @@ async fn serve_exhibition(
             catalog.as_bytes(),
         );
     }
+    if let Some((bytes, content_type)) = crate::server::stall_asset(path_only) {
+        return bytes_response(&method, StatusCode::OK, content_type, bytes);
+    }
     let Some(rest) = path_only.strip_prefix("/media/") else {
         return StatusCode::NOT_FOUND.into_response();
     };

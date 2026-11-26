@@ -1,5 +1,6 @@
 use super::catalog::Theme;
 
+/// Stall page shell. `include_str` path is watched so HTML edits rebuild the app.
 pub fn render_exhibit(theme: Theme, title: &str) -> String {
     include_str!("exhibit.html")
         .replace("{{TITLE}}", &escape_html(title))

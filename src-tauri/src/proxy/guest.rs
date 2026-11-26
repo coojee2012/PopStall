@@ -15,7 +15,8 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use crate::p2p::{RequestFrame, Traffic, encode_request, read_response_head};
-use crate::security::{MAX_REQUEST_BODY, is_restricted_host, validate_target};
+use crate::security::{MAX_REQUEST_BODY, MAX_RESPONSE_BYTES, is_restricted_host, validate_target};
+use crate::server::stall_asset;
 
 use super::PROXY_CSP;
 use super::media::{MediaHub, is_media_target};
@@ -97,6 +98,25 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
     if let Err(err) = validate_target(&target) {
         return locked(StatusCode::BAD_REQUEST, &err.to_string());
     }
+    let path_only = target.split(['?', '#']).next().unwrap_or(target.as_str());
+    if matches!(method, crate::p2p::Method::Get | crate::p2p::Method::Head) {
+        if let Some((bytes, content_type)) = stall_asset(path_only) {
+            let body = if method == crate::p2p::Method::Head {
+                Body::empty()
+            } else {
+                Body::from(bytes)
+            };
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_LENGTH, bytes.len())
+                .header(header::CACHE_CONTROL, "private, max-age=86400")
+                .header(header::CONTENT_SECURITY_POLICY, PROXY_CSP)
+                .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+                .body(body)
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        }
+    }
     let range = request
         .headers()
         .get(header::RANGE)
@@ -162,9 +182,6 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(header::REFERRER_POLICY, "no-referrer")
         .header(header::CACHE_CONTROL, cache_control);
-    if let Some(length) = head.content_length {
-        builder = builder.header(header::CONTENT_LENGTH, length);
-    }
     if let Some(range) = head.content_range {
         builder = builder.header(header::CONTENT_RANGE, range);
     }
@@ -172,20 +189,31 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
         builder = builder.header(header::ACCEPT_RANGES, "bytes");
     }
     if method == crate::p2p::Method::Head {
+        if let Some(length) = head.content_length {
+            builder = builder.header(header::CONTENT_LENGTH, length);
+        }
         return builder
             .body(Body::empty())
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     }
-    // Buffer text/docs/PDFs fully so WebView fetch()/iframe is not left with a
-    // truncated progressive body. PDFs especially go blank in iframe when short.
-    const BUFFER_UP_TO: u64 = 32 * 1024 * 1024;
-    let should_buffer = head.content_length.is_some_and(|len| len > 0 && len <= BUFFER_UP_TO)
+    // Buffer text/docs/PDFs fully. Progressive bodies make WebView PDF/novel blank.
+    let path_lower = target.to_ascii_lowercase();
+    let is_document = head.content_type.contains("pdf")
+        || head.content_type.starts_with("text/")
+        || path_lower.contains(".pdf")
+        || path_lower.contains(".txt")
+        || path_lower.contains(".md");
+    let known_len = head.content_length.filter(|len| *len > 0);
+    let should_buffer = is_document
         && !head.content_type.starts_with("audio/")
-        && !head.content_type.starts_with("video/");
+        && !head.content_type.starts_with("video/")
+        && known_len.map(|len| len <= MAX_RESPONSE_BYTES).unwrap_or(true);
     if should_buffer {
-        let want = head.content_length.unwrap_or(BUFFER_UP_TO) as usize;
+        let want = known_len
+            .unwrap_or(MAX_RESPONSE_BYTES)
+            .min(MAX_RESPONSE_BYTES) as usize;
         let mut buf = vec![0u8; want.min(64 * 1024)];
-        let mut body = Vec::with_capacity(want);
+        let mut body = Vec::with_capacity(want.min(1024 * 1024));
         loop {
             if body.len() >= want {
                 break;
@@ -205,9 +233,19 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
                 }
             }
         }
+        if known_len.is_some_and(|len| (body.len() as u64) < len) {
+            return locked(
+                StatusCode::BAD_GATEWAY,
+                &format!("文档只收到 {}/{} 字节，连接中断了", body.len(), known_len.unwrap_or(0)),
+            );
+        }
         return builder
+            .header(header::CONTENT_LENGTH, body.len())
             .body(Body::from(body))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+    if let Some(length) = head.content_length {
+        builder = builder.header(header::CONTENT_LENGTH, length);
     }
     builder
         .body(Body::from_stream(body_stream(recv, state.traffic)))
