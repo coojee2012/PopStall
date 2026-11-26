@@ -47,7 +47,7 @@ enum Engine {
     Exhibition {
         root: Arc<PathBuf>,
         theme: Theme,
-        page: Arc<String>,
+        title: Arc<String>,
         catalog: Arc<String>,
     },
     App { port: u16 },
@@ -83,10 +83,10 @@ impl StaticHost {
                 let root = canonical_dir(root)?;
                 let shelf = scan_folder(&root)?;
                 let items = files_for_theme(&shelf.files, theme);
-                let page = render_exhibit(theme, &shelf.report.folder_name);
+                let title = shelf.report.folder_name.clone();
                 let catalog = serde_json::to_string(&PublicCatalog {
                     theme: theme.as_str(),
-                    title: shelf.report.folder_name.clone(),
+                    title: title.clone(),
                     truncated: shelf.report.truncated,
                     items: items.iter().map(public_item).collect(),
                 })?;
@@ -95,7 +95,7 @@ impl StaticHost {
                     Engine::Exhibition {
                         root: Arc::new(root),
                         theme,
-                        page: Arc::new(page),
+                        title: Arc::new(title),
                         catalog: Arc::new(catalog),
                     },
                     label,
@@ -171,9 +171,9 @@ async fn dispatch(State(engine): State<Engine>, request: Request) -> Response {
         Engine::Exhibition {
             root,
             theme,
-            page,
+            title,
             catalog,
-        } => serve_exhibition(root, theme, page, catalog, request).await,
+        } => serve_exhibition(root, theme, title, catalog, request).await,
     }
 }
 
@@ -207,7 +207,7 @@ async fn serve_site(root: Arc<PathBuf>, request: Request) -> Response {
 async fn serve_exhibition(
     root: Arc<PathBuf>,
     theme: Theme,
-    page: Arc<String>,
+    title: Arc<String>,
     catalog: Arc<String>,
     request: Request,
 ) -> Response {
@@ -221,7 +221,10 @@ async fn serve_exhibition(
         return path_response(err);
     }
     if path_only == "/" || path_only == "/index.html" {
-        return html(&method, StatusCode::OK, page.as_str());
+        // Render from include_str on each hit so exhibit.html edits apply after
+        // rebuild without requiring the stall to be restarted.
+        let page = render_exhibit(theme, title.as_str());
+        return html(&method, StatusCode::OK, &page);
     }
     if path_only == "/_stall/catalog.json" {
         return bytes_response(

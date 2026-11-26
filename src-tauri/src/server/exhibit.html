@@ -45,21 +45,10 @@
     display: flex;
     flex-direction: column;
   }
-  header, main { width: min(1200px, calc(100% - 2rem)); margin: 0 auto; }
-  header { padding: 0.7rem 0 0.15rem; flex-shrink: 0; }
-  body[data-theme="novel"] header,
-  body[data-theme="document"] header {
-    padding-top: 0.55rem;
-  }
-  h1 {
-    margin: 0.1rem 0 0;
-    font-family: var(--serif);
-    font-weight: 500;
-    font-size: clamp(1.35rem, 2.6vw, 2rem);
-    letter-spacing: -0.03em;
-  }
-  #lede { margin: 0.2rem 0 0; color: var(--muted); line-height: 1.5; font-size: 0.9rem; }
-  main { padding: 0.55rem 0 1.2rem; }
+  /* StageView already shows the stall title — hide the duplicate page header so
+     the native child webview cannot paint a giant h1 over the 返回 button. */
+  body > header { display: none; }
+  main { width: min(1240px, calc(100% - 1.5rem)); margin: 0 auto; padding: 0.55rem 0 1rem; }
   body[data-theme="novel"] main,
   body[data-theme="document"] main {
     flex: 1;
@@ -89,18 +78,23 @@
     z-index: 3;
     display: flex;
     align-items: center;
-    gap: 0.7rem;
-    margin: 0 0 0.85rem;
-    padding: 0.35rem 0 0.7rem;
-    background: color-mix(in srgb, var(--paper) 88%, transparent);
+    gap: 0.55rem;
+    margin: 0 0 0.55rem;
+    padding: 0.15rem 0 0.5rem;
+    background: color-mix(in srgb, var(--paper) 92%, transparent);
     backdrop-filter: blur(10px);
+  }
+  .find .lede-inline {
+    color: var(--muted);
+    font-size: 0.8rem;
+    white-space: nowrap;
   }
   .find input {
     width: min(420px, 100%);
     border: 1px solid var(--line);
     background: var(--card);
     border-radius: 999px;
-    padding: 0.55rem 0.95rem;
+    padding: 0.45rem 0.85rem;
     outline: none;
   }
   .find input:focus { border-color: var(--ember); }
@@ -174,32 +168,61 @@
     color: #d9cbbd;
     pointer-events: none;
   }
-  .list { display: flex; flex-direction: column; gap: 0.3rem; }
+  .list { display: flex; flex-direction: column; gap: 0.25rem; }
   .row {
     appearance: none;
     display: grid;
-    grid-template-columns: 2.4rem minmax(0, 1fr) auto;
-    gap: 0.65rem;
+    grid-template-columns: 2.1rem minmax(0, 1fr) auto;
+    gap: 0.45rem 0.55rem;
     align-items: center;
     width: 100%;
     text-align: left;
     border: 1px solid transparent;
     background: transparent;
     border-radius: 0.85rem;
-    padding: 0.55rem 0.7rem;
+    padding: 0.5rem 0.55rem;
     cursor: pointer;
   }
+  .row.has-dl { grid-template-columns: 2.1rem minmax(0, 1fr) auto auto; }
   .row.chapter { grid-template-columns: minmax(0, 1fr); }
   .row:hover { background: color-mix(in srgb, var(--ember) 8%, var(--card)); }
   .row[aria-current="true"] {
     border-color: var(--ember);
     background: color-mix(in srgb, var(--ember) 12%, var(--card));
   }
-  .idx, .size { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 0.8rem; }
-  .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .idx, .size {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.78rem;
+    white-space: nowrap;
+  }
+  .size { justify-self: end; }
+  /* Two-line clamp + hover title for the full name (middle ellipsis in JS). */
+  .name {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    line-height: 1.35;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+  .dl {
+    appearance: none;
+    border: 1px solid color-mix(in srgb, var(--ember) 45%, var(--line));
+    background: color-mix(in srgb, var(--ember) 10%, var(--card));
+    border-radius: 999px;
+    padding: 0.22rem 0.65rem;
+    font-size: 0.75rem;
+    color: var(--ember);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .dl:hover { background: color-mix(in srgb, var(--ember) 18%, var(--card)); color: var(--ink); }
+  .dl:disabled { opacity: 0.5; cursor: default; }
   .reader {
     display: grid;
-    grid-template-columns: minmax(168px, 240px) minmax(0, 1fr);
+    grid-template-columns: minmax(260px, 38%) minmax(0, 1fr);
     gap: 0.85rem;
     align-items: stretch;
     flex: 1;
@@ -274,13 +297,13 @@
   .tools { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0 0 0.55rem; flex-shrink: 0; }
   .doc-layout {
     display: grid;
-    grid-template-columns: minmax(168px, 240px) minmax(0, 1fr);
+    grid-template-columns: minmax(260px, 38%) minmax(0, 1fr);
     gap: 0.85rem;
     align-items: stretch;
     flex: 1;
     min-height: 0;
   }
-  .doc-layout .list { overflow: auto; min-height: 0; }
+  .doc-layout .list { overflow: auto; min-height: 0; padding-right: 0.15rem; }
   .pdf-pane {
     display: flex;
     flex-direction: column;
@@ -327,10 +350,12 @@
       overflow: auto;
     }
     .reader, .doc-layout { grid-template-columns: 1fr; }
-    .reader .shelf, .doc-layout .list { max-height: 9rem; border-right: 0; }
+    .reader .shelf, .doc-layout .list { max-height: 11rem; border-right: 0; }
     .read-pane, .pdf-pane { min-height: 55vh; }
     .now-top { grid-template-columns: 1fr; display: grid; }
     .photos { grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); }
+    .row.has-dl { grid-template-columns: 2rem minmax(0, 1fr) auto; }
+    .row.has-dl .size { display: none; }
   }
 </style>
 </head>
@@ -358,10 +383,10 @@ const stage = document.getElementById("stage");
 const lede = document.getElementById("lede");
 const hints = {
   image: "点开看大图，左右键换一张。",
-  music: "点一首就开始，播完自动下一首。",
-  video: "点一集再播，不会自己开始。",
+  music: "点一首听；列表或播放条可下载到本地。",
+  video: "点一集再播；可下载到本地。",
   novel: "从左边选章节。字号和纸色会记住。",
-  document: "选一份再打开。"
+  document: "选一份打开；可下载到本地。"
 };
 const caps = { image: 360, music: 400, video: 200, novel: 400, document: 200 };
 
@@ -382,6 +407,131 @@ function formatSize(bytes) {
   return (size / 1073741824).toFixed(1) + " GB";
 }
 
+/** Keep extension visible; ellipsize the middle for long titles. */
+function displayName(title, maxChars) {
+  const s = String(title || "").trim() || "未命名";
+  const limit = maxChars || 40;
+  if ([...s].length <= limit) return s;
+  const chars = [...s];
+  const extMatch = s.match(/(\.[A-Za-z0-9]{1,8})$/);
+  const ext = extMatch ? extMatch[1] : "";
+  const extLen = ext ? [...ext].length : 0;
+  const budget = Math.max(10, limit - extLen - 1);
+  const head = Math.ceil(budget * 0.62);
+  const tail = budget - head;
+  const base = ext ? chars.slice(0, chars.length - extLen) : chars;
+  return base.slice(0, head).join("") + "…" + base.slice(-tail).join("") + ext;
+}
+
+function fileNameForSave(title, path) {
+  const raw = String(title || "").trim();
+  if (raw && /\.[A-Za-z0-9]{1,8}$/.test(raw)) return raw.replace(/[\\/:*?"<>|]/g, "_");
+  const fromPath = String(path || "").split("/").pop() || "";
+  const cleaned = (raw || fromPath || "download").replace(/[\\/:*?"<>|]/g, "_");
+  if (/\.[A-Za-z0-9]{1,8}$/.test(cleaned)) return cleaned;
+  const ext = (fromPath.match(/(\.[A-Za-z0-9]{1,8})$/) || [])[1] || "";
+  return cleaned + ext;
+}
+
+function clickDownload(href, filename) {
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  a.rel = "noopener";
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
+async function downloadItem(item, trigger) {
+  if (!item || !item.path) return;
+  const button = trigger || null;
+  const previous = button ? button.textContent : "";
+  const filename = fileNameForSave(item.title, item.path);
+  const size = Number(item.size) || 0;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "…";
+  }
+  try {
+    // Big media: stream via <a download> so we do not hold the whole file in RAM.
+    if (size > 48 * 1024 * 1024) {
+      clickDownload(item.path, filename);
+      return;
+    }
+    const res = await fetch(item.path);
+    if (!res.ok) {
+      const detail = (await res.text()).trim().slice(0, 120);
+      throw new Error(detail || ("下载失败 " + res.status));
+    }
+    const blob = await res.blob();
+    if (!blob.size) throw new Error("文件是空的");
+    const url = URL.createObjectURL(blob);
+    clickDownload(url, filename);
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (error) {
+    window.alert((error && error.message) || "下载失败");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = previous || "下载";
+    }
+  }
+}
+
+function makeFileRow(item, index, options) {
+  const opts = options || {};
+  // Avoid <button> inside <button>: downloadable rows are a div with a child .dl.
+  const row = document.createElement(opts.download ? "div" : "button");
+  if (!opts.download) row.type = "button";
+  row.className = "row" + (opts.download ? " has-dl" : "");
+  row.dataset.path = item.path;
+  row.title = item.title;
+  if (opts.download) {
+    row.setAttribute("role", "button");
+    row.tabIndex = 0;
+  }
+  const idx = document.createElement("span");
+  idx.className = "idx";
+  idx.textContent = String(index + 1).padStart(2, "0");
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = displayName(item.title);
+  const size = document.createElement("span");
+  size.className = "size";
+  size.textContent = formatSize(item.size);
+  row.append(idx, name, size);
+  if (opts.download) {
+    const dl = document.createElement("button");
+    dl.type = "button";
+    dl.className = "dl";
+    dl.textContent = "↓ 下载";
+    dl.title = "下载到本地：" + item.title;
+    dl.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void downloadItem(item, dl);
+    });
+    row.append(dl);
+  }
+  const open = () => {
+    if (opts.onOpen) opts.onOpen(item, row, index);
+  };
+  if (opts.onOpen) {
+    row.addEventListener("click", (event) => {
+      if (event.target.closest && event.target.closest(".dl")) return;
+      open();
+    });
+    row.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      if (event.target.closest && event.target.closest(".dl")) return;
+      event.preventDefault();
+      open();
+    });
+  }
+  return row;
+}
+
 async function main() {
   let catalog;
   try {
@@ -394,7 +544,10 @@ async function main() {
   }
   const items = catalog.items || [];
   const unit = { image: "张", music: "首", video: "个", novel: "篇", document: "份" }[theme] || "个";
-  lede.textContent = items.length ? (items.length + " " + unit + " · " + (hints[theme] || "")) : "这个主题里还没有可以展示的文件。";
+  const blurb = items.length
+    ? (items.length + " " + unit + " · " + (hints[theme] || ""))
+    : "这个主题里还没有可以展示的文件。";
+  lede.textContent = blurb;
   if (!items.length) {
     stage.innerHTML = '<p class="empty">这个主题里还没有可以展示的文件。</p>';
     return;
@@ -427,23 +580,28 @@ async function main() {
     paint(shown, hidden > 0 ? "先列出 " + shown.length + " 个。用搜索把范围缩小。" : "");
     return matched.length;
   };
+  const bar = document.createElement("div");
+  bar.className = "find";
+  const input = document.createElement("input");
+  input.type = "search";
+  input.placeholder = "找文件名";
+  input.autocomplete = "off";
+  input.setAttribute("aria-label", "找文件名");
+  const meta = document.createElement("span");
+  const hint = document.createElement("span");
+  hint.className = "lede-inline";
+  hint.textContent = blurb;
   if (items.length >= 8) {
-    const bar = document.createElement("label");
-    bar.className = "find";
-    const input = document.createElement("input");
-    input.type = "search";
-    input.placeholder = "找文件名";
-    input.autocomplete = "off";
-    input.setAttribute("aria-label", "找文件名");
-    const meta = document.createElement("span");
-    bar.append(input, meta);
-    stage.insertBefore(bar, host);
+    bar.append(input, meta, hint);
     input.addEventListener("input", () => {
       query = input.value.trim().toLowerCase();
       meta.textContent = apply() + " / " + items.length;
     });
     meta.textContent = items.length + " 个";
+  } else {
+    bar.append(hint);
   }
+  stage.insertBefore(bar, host);
   apply();
   if (catalog.truncated) {
     const note = document.createElement("p");
@@ -508,11 +666,16 @@ document.addEventListener("keydown", (event) => {
 function renderMusic(host, all) {
   const now = document.createElement("div");
   now.className = "now";
-  now.innerHTML = '<div class="now-top"><div><p class="kicker" id="kicker">准备好了</p><h2 id="track-title">选一首</h2><p id="track-sub">不会自动出声。</p></div><div class="transport"><button type="button" id="prev">上一首</button><button type="button" id="next">下一首</button></div></div>';
+  now.innerHTML = '<div class="now-top"><div><p class="kicker" id="kicker">准备好了</p><h2 id="track-title">选一首</h2><p id="track-sub">不会自动出声。</p></div><div class="transport"><button type="button" id="prev">上一首</button><button type="button" id="next">下一首</button><button type="button" class="dl" id="save" disabled>↓ 下载</button></div></div>';
   const audio = document.createElement("audio");
   audio.controls = true;
   audio.preload = "none";
   now.append(audio);
+  const saveBtn = now.querySelector("#save");
+  saveBtn.onclick = () => {
+    if (cursor < 0) return;
+    void downloadItem(all[cursor], saveBtn);
+  };
   if (all.length >= 8) now.style.top = "3.2rem";
   const list = document.createElement("div");
   list.className = "list";
@@ -574,6 +737,7 @@ function renderMusic(host, all) {
       URL.revokeObjectURL(blobUrl);
       blobUrl = "";
     }
+    saveBtn.disabled = false;
     mark();
     try {
       // Always pull the whole song into a blob. Progressive <audio src> against
@@ -615,15 +779,10 @@ function renderMusic(host, all) {
     list.replaceChildren();
     shown.forEach((item) => {
       const index = all.indexOf(item);
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "row";
-      button.dataset.path = item.path;
-      button.innerHTML = '<span class="idx">' + String(index + 1).padStart(2, "0") + '</span><span class="name"></span><span class="size"></span>';
-      button.querySelector(".name").textContent = item.title;
-      button.querySelector(".size").textContent = formatSize(item.size);
-      button.addEventListener("click", () => playAt(index));
-      list.append(button);
+      list.append(makeFileRow(item, index, {
+        download: true,
+        onOpen: (_item, _button, i) => playAt(i),
+      }));
     });
     mark();
   };
@@ -643,7 +802,12 @@ function renderVideo(host, all) {
   const transport = document.createElement("div");
   transport.className = "transport";
   transport.style.margin = "0.7rem 0";
-  transport.innerHTML = '<button type="button" id="prev">上一集</button><button type="button" id="next">下一集</button>';
+  transport.innerHTML = '<button type="button" id="prev">上一集</button><button type="button" id="next">下一集</button><button type="button" class="dl" id="save" disabled>↓ 下载</button>';
+  const saveBtn = transport.querySelector("#save");
+  saveBtn.onclick = () => {
+    if (cursor < 0) return;
+    void downloadItem(all[cursor], saveBtn);
+  };
   const title = document.createElement("p");
   title.id = "track-sub";
   const list = document.createElement("div");
@@ -669,6 +833,8 @@ function renderVideo(host, all) {
     const item = all[index];
     empty.hidden = true;
     title.textContent = "正在接通 " + item.title;
+    title.title = item.title;
+    saveBtn.disabled = false;
     if (blobUrl) {
       URL.revokeObjectURL(blobUrl);
       blobUrl = "";
@@ -708,11 +874,15 @@ function renderVideo(host, all) {
   }
   video.addEventListener("playing", () => {
     const item = all[cursor];
-    title.textContent = item ? item.title + " · " + formatSize(item.size) : "";
+    title.textContent = item ? displayName(item.title, 48) + " · " + formatSize(item.size) : "";
+    title.title = item ? item.title : "";
   });
   video.addEventListener("waiting", () => {
     const item = all[cursor];
-    if (item) title.textContent = "正在缓冲 " + item.title;
+    if (item) {
+      title.textContent = "正在缓冲 " + displayName(item.title, 40);
+      title.title = item.title;
+    }
   });
   video.addEventListener("progress", () => {
     if (video.readyState >= 3 || !video.buffered.length || cursor < 0) return;
@@ -734,15 +904,10 @@ function renderVideo(host, all) {
     list.replaceChildren();
     shown.forEach((item) => {
       const index = all.indexOf(item);
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "row";
-      button.dataset.path = item.path;
-      button.innerHTML = '<span class="idx">' + String(index + 1).padStart(2, "0") + '</span><span class="name"></span><span class="size"></span>';
-      button.querySelector(".name").textContent = item.title;
-      button.querySelector(".size").textContent = formatSize(item.size);
-      button.addEventListener("click", () => playAt(index));
-      list.append(button);
+      list.append(makeFileRow(item, index, {
+        download: true,
+        onOpen: (_item, _button, i) => playAt(i),
+      }));
     });
     mark();
   };
@@ -777,8 +942,9 @@ function renderNovel(host, stallTitle, items) {
     const button = document.createElement("button");
     button.className = "row chapter";
     button.type = "button";
+    button.title = item.title;
     button.innerHTML = '<span class="name"></span>';
-    button.querySelector(".name").textContent = item.title;
+    button.querySelector(".name").textContent = displayName(item.title, 48);
     button.addEventListener("click", () => {
       if (active && active.abort) active.abort();
       active = openChapter(item, button, shelf, article, pager, memoryKey, pageKey);
@@ -1051,7 +1217,17 @@ function renderDocs(host, items) {
   const next = document.createElement("button");
   next.type = "button";
   next.textContent = "下一页";
-  pager.append(prev, meta, next);
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "dl";
+  saveBtn.textContent = "↓ 下载";
+  saveBtn.disabled = true;
+  let currentDoc = null;
+  saveBtn.onclick = () => {
+    if (!currentDoc) return;
+    void downloadItem(currentDoc, saveBtn);
+  };
+  pager.append(prev, meta, next, saveBtn);
 
   async function paintPdfPage() {
     if (!pdfDoc) return;
@@ -1087,6 +1263,8 @@ function renderDocs(host, items) {
 
   async function openDoc(item, button) {
     const token = ++openToken;
+    currentDoc = item;
+    saveBtn.disabled = false;
     list.querySelectorAll(".row").forEach((node) => node.removeAttribute("aria-current"));
     button.setAttribute("aria-current", "true");
     pane.hidden = true;
@@ -1122,13 +1300,10 @@ function renderDocs(host, items) {
   }
 
   items.forEach((item, index) => {
-    const button = document.createElement("button");
-    button.className = "row";
-    button.type = "button";
-    button.innerHTML = '<span class="idx">' + String(index + 1).padStart(2, "0") + '</span><span class="name"></span><span class="size"></span>';
-    button.querySelector(".name").textContent = item.title;
-    button.querySelector(".size").textContent = formatSize(item.size);
-    button.addEventListener("click", () => openDoc(item, button));
+    const button = makeFileRow(item, index, {
+      download: true,
+      onOpen: (opened, row) => openDoc(opened, row),
+    });
     list.append(button);
     if (items.length === 1) openDoc(item, button);
   });

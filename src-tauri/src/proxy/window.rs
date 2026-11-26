@@ -51,19 +51,24 @@ pub fn attach_stage(app: &AppHandle, label: &str, target: &str, port: u16) -> an
                 .on_navigation(move |next| navigation_allowed(next, port))
                 .on_new_window(|_url, _features| NewWindowResponse::Deny)
                 .background_color(Color(0xf3, 0xec, 0xdf, 255)),
-            LogicalPosition::new(0.0, 64.0),
+            // Match StageView header (h-14 ≈ 56px). place_stage corrects once layout settles.
+            LogicalPosition::new(0.0, 56.0),
             LogicalSize::new(width, height),
         )
         .map_err(|err| anyhow::anyhow!("打开摊位页面失败: {err}"))?;
     Ok(())
 }
 
+/// Floor so a bad first layout cannot park the child webview over Stage chrome.
+const STAGE_CHROME_FLOOR: f64 = 52.0;
+
 pub fn place_stage(app: &AppHandle, label: &str, x: f64, y: f64, width: f64, height: f64) -> anyhow::Result<()> {
     let Some(webview) = app.get_webview(label) else {
         return Ok(());
     };
+    let top = y.max(STAGE_CHROME_FLOOR);
     webview
-        .set_position(LogicalPosition::new(x.max(0.0), y.max(0.0)))
+        .set_position(LogicalPosition::new(x.max(0.0), top))
         .map_err(|err| anyhow::anyhow!("移动摊位页面失败: {err}"))?;
     webview
         .set_size(LogicalSize::new(width.max(1.0), height.max(1.0)))
@@ -83,5 +88,5 @@ fn stage_size(window: &tauri::Window) -> (f64, f64) {
     };
     let scale = window.scale_factor().unwrap_or(1.0);
     let logical: LogicalSize<f64> = inner.to_logical(scale);
-    (logical.width.max(1.0), (logical.height - 64.0).max(1.0))
+    (logical.width.max(1.0), (logical.height - 56.0).max(1.0))
 }

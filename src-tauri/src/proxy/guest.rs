@@ -14,9 +14,9 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use crate::p2p::{RequestFrame, Traffic, encode_request, read_response_head};
+use crate::p2p::{Method, RequestFrame, Traffic, encode_request, read_response_head};
 use crate::security::{MAX_REQUEST_BODY, MAX_RESPONSE_BYTES, is_restricted_host, validate_target};
-use crate::server::stall_asset;
+use crate::server::{Theme, render_exhibit, stall_asset};
 
 use super::PROXY_CSP;
 use super::media::{MediaHub, is_media_target};
@@ -99,9 +99,29 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
         return locked(StatusCode::BAD_REQUEST, &err.to_string());
     }
     let path_only = target.split(['?', '#']).next().unwrap_or(target.as_str());
-    if matches!(method, crate::p2p::Method::Get | crate::p2p::Method::Head) {
+    if matches!(method, Method::Get | Method::Head) {
+        // Exhibition shell comes from this build — not the remote host — so UI
+        // fixes (download, layout) apply when visiting older stalls.
+        if path_only == "/" || path_only == "/index.html" {
+            if let Some(page) = local_exhibit_shell(&state).await {
+                let body = if method == Method::Head {
+                    Body::empty()
+                } else {
+                    Body::from(page.clone())
+                };
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                    .header(header::CONTENT_LENGTH, page.len())
+                    .header(header::CACHE_CONTROL, "no-store")
+                    .header(header::CONTENT_SECURITY_POLICY, PROXY_CSP)
+                    .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+                    .body(body)
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            }
+        }
         if let Some((bytes, content_type)) = stall_asset(path_only) {
-            let body = if method == crate::p2p::Method::Head {
+            let body = if method == Method::Head {
                 Body::empty()
             } else {
                 Body::from(bytes)
@@ -250,6 +270,60 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
     builder
         .body(Body::from_stream(body_stream(recv, state.traffic)))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Pull catalog from the host and render the local exhibit.html shell.
+async fn local_exhibit_shell(state: &ProxyState) -> Option<String> {
+    let body = p2p_get_bytes(state, "/_stall/catalog.json").await.ok()?;
+    let catalog: serde_json::Value = serde_json::from_slice(&body).ok()?;
+    let theme = Theme::parse(catalog.get("theme")?.as_str()?)?;
+    let title = catalog
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or("摊位");
+    Some(render_exhibit(theme, title))
+}
+
+async fn p2p_get_bytes(state: &ProxyState, target: &str) -> anyhow::Result<Vec<u8>> {
+    let frame = encode_request(&RequestFrame {
+        method: Method::Get,
+        target: target.to_string(),
+        range: None,
+        content_type: None,
+        body: Vec::new(),
+        pass: state.password.clone(),
+    })?;
+    state.traffic.record_sent(frame.len() as u64);
+    let (mut send, mut recv) = state
+        .connection
+        .open_bi()
+        .await
+        .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+    send.write_all(&frame).await?;
+    send.finish()
+        .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+    let head = read_response_head(&mut recv).await?;
+    if head.status != 200 {
+        anyhow::bail!("catalog status {}", head.status);
+    }
+    let want = head
+        .content_length
+        .unwrap_or(MAX_RESPONSE_BYTES)
+        .min(MAX_RESPONSE_BYTES) as usize;
+    let mut body = Vec::with_capacity(want.min(64 * 1024));
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let size = AsyncReadExt::read(&mut recv, &mut buf).await?;
+        if size == 0 {
+            break;
+        }
+        state.traffic.record_received(size as u64);
+        if body.len() + size > want {
+            anyhow::bail!("catalog too large");
+        }
+        body.extend_from_slice(&buf[..size]);
+    }
+    Ok(body)
 }
 
 fn check_host(request: &Request, port: u16) -> Result<(), Response> {
