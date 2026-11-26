@@ -53,6 +53,10 @@ struct MediaSlot {
     store: StdMutex<Option<std::fs::File>>,
     downloaded: AtomicU64,
     content_type: watch::Sender<Option<String>>,
+    /// Must keep at least one receiver alive: tokio `watch::Sender::send` is a
+    /// no-op (returns SendError) when every receiver was dropped, which left us
+    /// with a finished download and the opaque "没有读到影片" error.
+    _content_type_rx: watch::Receiver<Option<String>>,
     status: AtomicU16,
     total: AtomicU64,
     done: AtomicBool,
@@ -156,10 +160,25 @@ impl MediaHub {
     pub async fn serve(&self, method: Method, target: String, range: Option<String>) -> Response {
         let slot = self.slot_for(&target).await;
         if let Err(err) = slot.wait_ready().await {
-            return plain(StatusCode::BAD_GATEWAY, &err);
+            // Finished bytes on disk but header watch was lost — still playable.
+            if slot.done.load(Ordering::Acquire)
+                && slot.downloaded() > 0
+                && slot.failure().await.is_none()
+            {
+                tracing::warn!(target = %target, "影音头缺失，按扩展名继续播放");
+            } else {
+                return plain(StatusCode::BAD_GATEWAY, &err);
+            }
         }
-        let status = StatusCode::from_u16(slot.status.load(Ordering::Acquire))
-            .unwrap_or(StatusCode::BAD_GATEWAY);
+        let status = {
+            let raw = slot.status.load(Ordering::Acquire);
+            if raw == 0 && slot.downloaded() > 0 {
+                200
+            } else {
+                raw
+            }
+        };
+        let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
         let reported = slot
             .content_type
             .borrow()
@@ -423,7 +442,7 @@ impl MediaSlot {
         traffic: Arc<Traffic>,
         password: String,
     ) -> Arc<Self> {
-        let (content_type, _) = watch::channel(None);
+        let (content_type, content_type_rx) = watch::channel(None);
         let (cancel, cancel_rx) = watch::channel(false);
         let seq = MEDIA_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("popstall-{}-{seq}.media", std::process::id()));
@@ -434,6 +453,7 @@ impl MediaSlot {
             store: StdMutex::new(None),
             downloaded: AtomicU64::new(0),
             content_type,
+            _content_type_rx: content_type_rx,
             status: AtomicU16::new(0),
             total: AtomicU64::new(0),
             done: AtomicBool::new(false),
@@ -466,7 +486,13 @@ impl MediaSlot {
                 return Err(err);
             }
             if self.done.load(Ordering::Acquire) {
-                return Err(self.failure().await.unwrap_or_else(|| "没有读到影片".to_string()));
+                return Err(self.failure().await.unwrap_or_else(|| {
+                    if self.downloaded() > 0 {
+                        "影音头信息丢失，请再点一次".to_string()
+                    } else {
+                        "没有读到影音数据".to_string()
+                    }
+                }));
             }
             wait_notify(self).await;
         }
@@ -592,7 +618,7 @@ async fn pump(
         slot.total.store(len, Ordering::Release);
     }
     slot.status.store(head.status, Ordering::Release);
-    let _ = slot.content_type.send(Some(head.content_type));
+    slot.content_type.send_replace(Some(head.content_type));
     slot.notify.notify_waiters();
     let started = std::time::Instant::now();
     tracing::info!(
