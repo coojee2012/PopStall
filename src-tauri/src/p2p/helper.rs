@@ -212,9 +212,10 @@ impl HelperHub {
         let active = self.active.load(Ordering::Relaxed);
         let via_helper = self.via_helper.load(Ordering::Relaxed);
         let offers = self.book.list(self.endpoint.id()).await.len();
-        let (capable, reach_note) = reach_snapshot(&self.endpoint, &self.routes);
         let listen_port = stored_listen_port(&self.listen_port);
         let bound_ports = bound_udp_ports(&self.endpoint);
+        let (capable, reach_note) =
+            reach_snapshot(&self.endpoint, &self.routes, listen_port, &bound_ports);
         let port_note = port_status_note(listen_port, &bound_ports);
         HelperStatus {
             enabled,
@@ -288,16 +289,19 @@ impl HelperHub {
         self.listen_port
             .store(u32::from(port.unwrap_or(0)), Ordering::Relaxed);
         if enabled {
+            let bound = bound_udp_ports(&self.endpoint);
             if let Some(want) = port {
-                let bound = bound_udp_ports(&self.endpoint);
                 if !bound.contains(&want) {
                     return Err(format!(
                         "端口 {want} 已保存，但当前还在监听 {}。请完全退出闪摊再打开，才会按路由器转发的端口监听。",
                         bound_ports_label(&bound)
                     ));
                 }
+                // User asserted router UDP forward on this port — don't block on STUN.
+            } else {
+                wait_reachability(&self.endpoint, &self.routes, None, &bound, Duration::from_secs(20))
+                    .await?;
             }
-            wait_reachability(&self.endpoint, &self.routes, Duration::from_secs(6)).await?;
         }
         let _ = self.enabled.send(enabled);
         Ok(())
@@ -705,8 +709,9 @@ async fn serve_gossip(
                     if *enabled_rx.borrow() {
                         // Fixed listen port means the user set up router forwarding —
                         // don't auto-disable when STUN flaps; keep advertising.
-                        let fixed_port = stored_listen_port(&listen_port).is_some();
-                        if !fixed_port && !reachability_ok(&endpoint, &routes) {
+                        let port = stored_listen_port(&listen_port);
+                        let bound = bound_udp_ports(&endpoint);
+                        if !reachability_ok(&endpoint, &routes, port, &bound) {
                             tracing::info!("互助中继已关闭：当前直连不到这台机器");
                             let _ = enabled.send(false);
                             continue;
@@ -791,10 +796,17 @@ async fn broadcast_open(
     endpoint: &Endpoint,
 ) {
     let load = active.load(Ordering::Relaxed).min(255) as u8;
-    let addrs = dialable_addrs(endpoint, stored_listen_port(listen_port));
+    let port = stored_listen_port(listen_port);
+    let addrs = dialable_addrs(endpoint, port);
     // Tell iroh itself about the forwarded WAN socket so path selection / disco
     // use the same port we put on the helper card (not a random STUN mapping).
     publish_external_addrs(endpoint, &addrs).await;
+    if addrs.is_empty() {
+        tracing::warn!(
+            ?port,
+            "互助广播暂时没有公网拨号地址（等 STUN/有人直连后再带上 IP）"
+        );
+    }
     let bytes = encode_open(secret, limit_bps.load(Ordering::Relaxed), load, &addrs);
     match sender.broadcast(Bytes::from(bytes)).await {
         Ok(()) => tracing::info!(?addrs, "已广播互助中继"),
@@ -1040,11 +1052,41 @@ async fn pick_helper(
     None
 }
 
-fn reachability_ok(endpoint: &Endpoint, routes: &RouteBook) -> bool {
-    routes.inbound_direct() || has_global_dial_addr(endpoint)
+fn fixed_port_ready(listen_port: Option<u16>, bound: &[u16]) -> bool {
+    listen_port.is_some_and(|port| bound.contains(&port))
 }
 
-fn reach_snapshot(endpoint: &Endpoint, routes: &RouteBook) -> (bool, String) {
+fn reachability_ok(
+    endpoint: &Endpoint,
+    routes: &RouteBook,
+    listen_port: Option<u16>,
+    bound: &[u16],
+) -> bool {
+    fixed_port_ready(listen_port, bound)
+        || routes.inbound_direct()
+        || has_global_dial_addr(endpoint)
+}
+
+fn reach_snapshot(
+    endpoint: &Endpoint,
+    routes: &RouteBook,
+    listen_port: Option<u16>,
+    bound: &[u16],
+) -> (bool, String) {
+    if fixed_port_ready(listen_port, bound) {
+        let port = listen_port.unwrap_or(0);
+        let has_wan = has_global_dial_addr(endpoint);
+        return (
+            true,
+            if has_wan {
+                format!("已固定 UDP {port}，且已看到公网地址，适合当互助中继。")
+            } else {
+                format!(
+                    "已固定 UDP {port}（按端口转发可开）。若广播里还没有公网 IP，等几秒或确认路由器已转发到本机。"
+                )
+            },
+        );
+    }
     if routes.inbound_direct() {
         return (
             true,
@@ -1059,22 +1101,26 @@ fn reach_snapshot(endpoint: &Endpoint, routes: &RouteBook) -> (bool, String) {
     }
     (
         false,
-        "现在直连不到你：还没有公网地址，也还没有人打洞打到这台机器。不需要自己填端口；等网络就绪或有人成功直连后再开。".to_string(),
+        "现在还不能当互助：没有公网地址，也还没有人打洞打到这台机器。可在上方填路由器已转发的 UDP 端口后重启再开。".to_string(),
     )
 }
 
 async fn wait_reachability(
     endpoint: &Endpoint,
     routes: &RouteBook,
+    listen_port: Option<u16>,
+    bound: &[u16],
     timeout: Duration,
 ) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     loop {
-        if reachability_ok(endpoint, routes) {
+        let bound_now = bound_udp_ports(endpoint);
+        let ports = if bound_now.is_empty() { bound } else { &bound_now };
+        if reachability_ok(endpoint, routes, listen_port, ports) {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(reach_snapshot(endpoint, routes).1);
+            return Err(reach_snapshot(endpoint, routes, listen_port, ports).1);
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }

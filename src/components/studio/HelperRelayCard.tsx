@@ -219,7 +219,7 @@ export function HelperRelayCard() {
             type="button"
             role="switch"
             aria-checked={enabled}
-            disabled={busy || (!enabled && !capable)}
+            disabled={busy || (!enabled && !capable && !listenPort.trim())}
             onClick={() => {
               if (enabled) {
                 void apply(false, limitBps, listenPort);
@@ -306,8 +306,12 @@ export function HelperRelayCard() {
               <Button type="button" className="bg-transparent text-ink hover:bg-paper" onClick={() => setAsk(false)}>
                 先不要
               </Button>
-              <Button type="button" disabled={busy || !capable} onClick={() => void apply(true, limitBps, listenPort)}>
-                {busy ? "正在检测" : "打开中继"}
+              <Button
+                type="button"
+                disabled={busy || (!capable && !listenPort.trim())}
+                onClick={() => void apply(true, limitBps, listenPort)}
+              >
+                {busy ? "正在打开" : "打开中继"}
               </Button>
             </div>
           </div>
