@@ -45,6 +45,9 @@ struct HubInner {
 static MEDIA_FILE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 struct MediaSlot {
+    /// Normalized path used for cache lookup (percent-decoded).
+    key: String,
+    /// Wire target as the browser requested (keep percent-encoding for http::Uri).
     target: String,
     path: PathBuf,
     store: StdMutex<Option<std::fs::File>>,
@@ -67,19 +70,42 @@ impl Drop for MediaSlot {
     }
 }
 
-pub fn is_media_target(target: &str) -> bool {
+fn media_extension(target: &str) -> Option<String> {
     let path = target.split(['?', '#']).next().unwrap_or(target);
-    let Some(ext) = path.rsplit('.').next() else {
-        return false;
-    };
-    if ext.len() > 4 || ext == path {
-        return false;
+    let decoded = percent_encoding::percent_decode_str(path)
+        .decode_utf8()
+        .unwrap_or(std::borrow::Cow::Borrowed(path));
+    let ext = decoded.rsplit('.').next()?;
+    if ext.len() > 4 || ext == decoded.as_ref() {
+        return None;
     }
+    Some(ext.to_ascii_lowercase())
+}
+
+pub fn is_media_target(target: &str) -> bool {
     matches!(
-        ext.to_ascii_lowercase().as_str(),
-        "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "aac" | "aiff"
-            | "mp4" | "m4v" | "mov" | "webm" | "mkv" | "avi" | "ogv" | "mpg" | "mpeg"
+        media_extension(target).as_deref(),
+        Some(
+            "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "aac" | "aiff"
+                | "mp4" | "m4v" | "mov" | "webm" | "mkv" | "avi" | "ogv" | "mpg" | "mpeg"
+        )
     )
+}
+
+pub fn is_audio_target(target: &str) -> bool {
+    matches!(
+        media_extension(target).as_deref(),
+        Some("mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "aac" | "aiff")
+    )
+}
+
+/// Stable slot key so `/media/a%20b.mp3` and decoded forms share one cache.
+fn media_slot_key(target: &str) -> String {
+    let path = target.split(['?', '#']).next().unwrap_or(target);
+    percent_encoding::percent_decode_str(path)
+        .decode_utf8()
+        .map(|value| value.into_owned())
+        .unwrap_or_else(|_| path.to_string())
 }
 
 #[derive(Debug)]
@@ -148,6 +174,12 @@ impl MediaHub {
             return media_response(status, &ctype, None, None, Body::from(body), method == Method::Head);
         }
 
+        // Songs are small on the wire here; WebView2 is unreliable with progressive
+        // audio bodies. Wait for the whole file, then answer with an honest length.
+        if is_audio_target(&target) {
+            return self.serve_audio_complete(slot, ctype, method, range).await;
+        }
+
         let total = slot.total.load(Ordering::Acquire);
         let head = method == Method::Head;
         let parsed = range.as_deref().and_then(parse_byte_range);
@@ -210,6 +242,74 @@ impl MediaHub {
                 // Answer 200 and stream from the on-disk cache as it fills.
                 self.serve_full_stream(slot, ctype, total).await
             }
+        }
+    }
+
+    async fn serve_audio_complete(
+        &self,
+        slot: Arc<MediaSlot>,
+        ctype: String,
+        method: Method,
+        range: Option<String>,
+    ) -> Response {
+        if let Err(err) = slot.wait_finished().await {
+            return plain(StatusCode::BAD_GATEWAY, &err);
+        }
+        let got = slot.downloaded();
+        let total = slot.total.load(Ordering::Acquire);
+        if got == 0 {
+            return plain(StatusCode::BAD_GATEWAY, "这首歌是空的");
+        }
+        if total > 0 && got < total {
+            return plain(
+                StatusCode::BAD_GATEWAY,
+                &format!("这首歌只下到 {got}/{total} 字节，连接中断了"),
+            );
+        }
+        let file_len = if total > 0 { total } else { got };
+        let head = method == Method::Head;
+        if head {
+            return media_response(StatusCode::OK, &ctype, Some(file_len), None, Body::empty(), true);
+        }
+        let parsed = range.as_deref().and_then(parse_byte_range);
+        match parsed {
+            Some(ByteRange::Suffix { len }) => {
+                let start = file_len.saturating_sub(len.min(SLICE).min(file_len));
+                match slot.read_span(start, file_len).await {
+                    Ok(slice) => ranged(ctype, start, file_len, slice, false),
+                    Err(err) => plain(StatusCode::BAD_GATEWAY, &err),
+                }
+            }
+            Some(ByteRange::Closed { start, end }) => {
+                let end = end.min(file_len);
+                if start >= file_len {
+                    return unsatisfiable(file_len);
+                }
+                match slot.read_span(start, end).await {
+                    Ok(slice) => ranged(ctype, start, file_len, slice, false),
+                    Err(err) => plain(StatusCode::BAD_GATEWAY, &err),
+                }
+            }
+            Some(ByteRange::Open { start }) => {
+                if start >= file_len {
+                    return unsatisfiable(file_len);
+                }
+                match slot.read_span(start, file_len).await {
+                    Ok(slice) => ranged(ctype, start, file_len, slice, false),
+                    Err(err) => plain(StatusCode::BAD_GATEWAY, &err),
+                }
+            }
+            None => match slot.read_span(0, file_len).await {
+                Ok(slice) => media_response(
+                    StatusCode::OK,
+                    &ctype,
+                    Some(slice.len() as u64),
+                    None,
+                    Body::from(slice),
+                    false,
+                ),
+                Err(err) => plain(StatusCode::BAD_GATEWAY, &err),
+            },
         }
     }
 
@@ -280,14 +380,26 @@ impl MediaHub {
     }
 
     async fn slot_for(&self, target: &str) -> Arc<MediaSlot> {
+        let key = media_slot_key(target);
         let mut slots = self.inner.slots.lock().await;
-        if let Some(found) = slots.iter().find(|slot| slot.target == target) {
-            return found.clone();
+        if let Some(found) = slots.iter().find(|slot| slot.key == key) {
+            // A cancelled/failed slot must not poison the next play of the same song.
+            if !slot_is_poisoned(found) {
+                return found.clone();
+            }
+            if let Some(index) = slots.iter().position(|slot| Arc::ptr_eq(slot, found)) {
+                slots.remove(index).cancel();
+            }
         }
-        while slots.len() >= 2 {
-            slots.remove(0).cancel();
+        while slots.len() >= 6 {
+            let drop_at = slots
+                .iter()
+                .position(|slot| slot.done.load(Ordering::Acquire))
+                .unwrap_or(0);
+            slots.remove(drop_at).cancel();
         }
         let slot = MediaSlot::start(
+            key,
             target.to_string(),
             self.inner.connection.clone(),
             self.inner.traffic.clone(),
@@ -298,13 +410,25 @@ impl MediaHub {
     }
 }
 
+fn slot_is_poisoned(slot: &MediaSlot) -> bool {
+    slot.done.load(Ordering::Acquire)
+        && (slot.downloaded() == 0 || slot.failed.try_lock().ok().and_then(|g| g.clone()).is_some())
+}
+
 impl MediaSlot {
-    fn start(target: String, connection: Connection, traffic: Arc<Traffic>, password: String) -> Arc<Self> {
+    fn start(
+        key: String,
+        target: String,
+        connection: Connection,
+        traffic: Arc<Traffic>,
+        password: String,
+    ) -> Arc<Self> {
         let (content_type, _) = watch::channel(None);
         let (cancel, cancel_rx) = watch::channel(false);
         let seq = MEDIA_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("popstall-{}-{seq}.media", std::process::id()));
         let slot = Arc::new(Self {
+            key,
             target,
             path,
             store: StdMutex::new(None),
@@ -552,23 +676,17 @@ fn media_content_type(target: &str, reported: String) -> String {
     if reported.starts_with("audio/") || reported.starts_with("video/") {
         return reported;
     }
-    let path = target.split(['?', '#']).next().unwrap_or(target);
-    let ext = path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match ext.as_str() {
-        "mp3" => "audio/mpeg".into(),
-        "wav" => "audio/wav".into(),
-        "flac" => "audio/flac".into(),
-        "ogg" | "opus" => "audio/ogg".into(),
-        "m4a" | "aac" => "audio/mp4".into(),
-        "mp4" | "m4v" => "video/mp4".into(),
-        "webm" => "video/webm".into(),
-        "mov" => "video/quicktime".into(),
-        "mkv" => "video/x-matroska".into(),
-        "ogv" => "video/ogg".into(),
+    match media_extension(target).as_deref() {
+        Some("mp3") => "audio/mpeg".into(),
+        Some("wav") => "audio/wav".into(),
+        Some("flac") => "audio/flac".into(),
+        Some("ogg") | Some("opus") => "audio/ogg".into(),
+        Some("m4a") | Some("aac") => "audio/mp4".into(),
+        Some("mp4") | Some("m4v") => "video/mp4".into(),
+        Some("webm") => "video/webm".into(),
+        Some("mov") => "video/quicktime".into(),
+        Some("mkv") => "video/x-matroska".into(),
+        Some("ogv") => "video/ogg".into(),
         _ => reported,
     }
 }
@@ -773,8 +891,15 @@ mod tests {
     fn recognizes_audio_and_video_names() {
         assert!(is_media_target("/room/night.MP4"));
         assert!(is_media_target("/room/song.mp3?x=1"));
+        assert!(is_media_target("/media/Rolling%20in%20the%20deep.mp3"));
+        assert!(super::is_audio_target("/media/Rolling%20in%20the%20deep.mp3"));
+        assert!(!super::is_audio_target("/room/night.MP4"));
         assert!(!is_media_target("/room/index.html"));
         assert!(!is_media_target("/room/photo.png"));
+        assert_eq!(
+            super::media_slot_key("/media/Rolling%20in%20the%20deep.mp3"),
+            "/media/Rolling in the deep.mp3"
+        );
     }
 
     #[test]

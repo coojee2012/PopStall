@@ -171,6 +171,7 @@
   }
   article {
     max-width: 68ch;
+    min-height: 12rem;
     background: var(--card);
     border: 1px solid var(--line);
     border-radius: 1.2rem;
@@ -179,6 +180,7 @@
     font-family: var(--serif);
     font-size: var(--read, 1.12rem);
     line-height: 1.95;
+    overflow-wrap: anywhere;
   }
   article h2, article h3 { font-weight: 500; line-height: 1.35; }
   article pre {
@@ -190,6 +192,18 @@
     font-size: 0.86em;
     line-height: 1.5;
   }
+  .pager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.55rem;
+    margin-top: 1.1rem;
+    padding-top: 0.9rem;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  .pager button:disabled { opacity: 0.4; cursor: default; }
   .tools { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0 0 0.8rem; }
   iframe, embed { width: 100%; height: 78vh; border: 0; border-radius: 1rem; background: white; }
   #lightbox[hidden] { display: none; }
@@ -447,7 +461,7 @@ function renderMusic(host, all) {
     const item = all[index];
     document.getElementById("kicker").textContent = "正在打开";
     document.getElementById("track-title").textContent = item.title;
-    sub().textContent = "正在接通 " + formatSize(item.size);
+    sub().textContent = "正在拉取 " + formatSize(item.size);
     audio.dataset.title = item.title;
     if (blobUrl) {
       URL.revokeObjectURL(blobUrl);
@@ -455,29 +469,23 @@ function renderMusic(host, all) {
     }
     mark();
     try {
-      audio.src = item.path;
-      await audio.play();
+      // Always pull the whole song into a blob. Progressive <audio src> against
+      // the guest proxy is flaky on WebView2 and was returning opaque 502s.
+      const res = await fetch(item.path);
       if (token !== playToken) return;
+      if (!res.ok) {
+        const detail = (await res.text()).trim().slice(0, 160);
+        throw new Error(detail || ("取歌失败 " + res.status));
+      }
+      const blob = await res.blob();
+      if (token !== playToken) return;
+      if (!blob.size) throw new Error("拉到的歌是空的");
+      blobUrl = URL.createObjectURL(blob);
+      audio.src = blobUrl;
+      await audio.play();
     } catch (error) {
       if (token !== playToken) return;
-      sub().textContent = "直连播不了，改缓冲整首…";
-      try {
-        const res = await fetch(item.path);
-        if (token !== playToken) return;
-        if (!res.ok) throw new Error("取歌失败 " + res.status);
-        const blob = await res.blob();
-        if (token !== playToken) return;
-        blobUrl = URL.createObjectURL(blob);
-        audio.src = blobUrl;
-        await audio.play();
-      } catch (fallback) {
-        if (token !== playToken) return;
-        failPlay(
-          (fallback && fallback.message) ||
-            (error && error.message) ||
-            "请再点一次"
-        );
-      }
+      failPlay((error && error.message) || "请再点一次");
     }
   }
   now.querySelector("#prev").onclick = () => playAt(cursor < 0 ? 0 : cursor - 1);
@@ -520,7 +528,7 @@ function renderVideo(host, all) {
   const video = document.createElement("video");
   video.controls = true;
   video.playsInline = true;
-  video.preload = "none";
+  video.preload = "metadata";
   const empty = document.createElement("p");
   empty.className = "screen-empty";
   empty.textContent = "点下面一集再播";
@@ -535,6 +543,8 @@ function renderVideo(host, all) {
   list.className = "list";
   host.append(screen, transport, title, list);
   let cursor = -1;
+  let blobUrl = "";
+  let playToken = 0;
   function mark() {
     const current = all[cursor];
     list.querySelectorAll(".row").forEach((node) => {
@@ -542,19 +552,51 @@ function renderVideo(host, all) {
       else node.removeAttribute("aria-current");
     });
   }
-  function playAt(index) {
+  function failPlay(message) {
+    title.textContent = message || "播不了，请再点一次";
+  }
+  async function playAt(index) {
     if (index < 0 || index >= all.length) return;
+    const token = ++playToken;
     cursor = index;
     const item = all[index];
     empty.hidden = true;
     title.textContent = "正在接通 " + item.title;
-    video.src = item.path;
+    if (blobUrl) {
+      URL.revokeObjectURL(blobUrl);
+      blobUrl = "";
+    }
     mark();
-    const play = video.play();
-    if (play && play.catch) {
-      play.catch((error) => {
-        title.textContent = "播不了：" + (error && error.message ? error.message : "请再点一次");
-      });
+    try {
+      video.src = item.path;
+      await video.play();
+      if (token !== playToken) return;
+    } catch (error) {
+      if (token !== playToken) return;
+      const tooBig = Number(item.size) > 64 * 1024 * 1024;
+      if (tooBig) {
+        failPlay("播不了：" + ((error && error.message) || "试试 H.264 的 MP4"));
+        return;
+      }
+      title.textContent = "直连播不了，改缓冲整段…";
+      try {
+        const res = await fetch(item.path);
+        if (token !== playToken) return;
+        if (!res.ok) throw new Error("取片失败 " + res.status);
+        const blob = await res.blob();
+        if (token !== playToken) return;
+        blobUrl = URL.createObjectURL(blob);
+        video.src = blobUrl;
+        await video.play();
+      } catch (fallback) {
+        if (token !== playToken) return;
+        failPlay(
+          "播不了：" +
+            ((fallback && fallback.message) ||
+              (error && error.message) ||
+              "请检查格式是否为 H.264/MP4")
+        );
+      }
     }
   }
   video.addEventListener("playing", () => {
@@ -570,6 +612,11 @@ function renderVideo(host, all) {
     if (!isFinite(video.duration) || video.duration <= 0) return;
     const end = video.buffered.end(video.buffered.length - 1);
     title.textContent = "正在缓冲 " + Math.min(99, Math.round(end / video.duration * 100)) + "%";
+  });
+  video.addEventListener("error", () => {
+    if (cursor < 0) return;
+    const code = video.error && video.error.code;
+    if (code === 4) failPlay("格式不被支持，请换 H.264 的 MP4 / WebM");
   });
   video.addEventListener("ended", () => {
     if (cursor + 1 < all.length) playAt(cursor + 1);
@@ -609,7 +656,8 @@ function renderNovel(host, stallTitle, items) {
   article.textContent = "选一个章节。";
   const memoryKey = "popstall-chapter:" + stallTitle;
   const remembered = localStorage.getItem(memoryKey);
-  let opened = false;
+  let openItem = null;
+  let openButton = null;
   items.forEach((item) => {
     const button = document.createElement("button");
     button.className = "row chapter";
@@ -618,12 +666,15 @@ function renderNovel(host, stallTitle, items) {
     button.querySelector(".name").textContent = item.title;
     button.addEventListener("click", () => openChapter(item, button, article, list, memoryKey));
     list.append(button);
-    if (!opened && (!remembered || remembered === item.path)) {
-      opened = true;
-      button.click();
+    if (!openItem && (!remembered || remembered === item.path)) {
+      openItem = item;
+      openButton = button;
     }
   });
-  if (!opened && list.firstChild) list.firstChild.click();
+  if (!openItem && items[0] && list.firstChild) {
+    openItem = items[0];
+    openButton = list.firstChild;
+  }
   wrap.append(list, article);
   host.append(tools, wrap);
   document.getElementById("smaller").onclick = () => resize(-1);
@@ -634,6 +685,9 @@ function renderNovel(host, stallTitle, items) {
     else delete document.body.dataset.paper;
     localStorage.setItem("popstall-paper", night ? "night" : "day");
   };
+  if (openItem && openButton) {
+    queueMicrotask(() => openChapter(openItem, openButton, article, list, memoryKey));
+  }
 }
 
 function resize(delta) {
@@ -641,6 +695,67 @@ function resize(delta) {
   const next = Math.min(28, Math.max(15, current + delta));
   document.documentElement.style.setProperty("--read", next + "px");
   localStorage.setItem("popstall-read-size", String(next));
+}
+
+const NOVEL_PAGE_CHARS = 10000;
+
+function decodeTextBytes(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return new TextDecoder("utf-8").decode(bytes.subarray(3));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return new TextDecoder("utf-16le").decode(bytes.subarray(2));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return new TextDecoder("utf-16be").decode(bytes.subarray(2));
+  }
+  const sample = bytes.subarray(0, Math.min(bytes.length, 8192));
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(sample);
+    return new TextDecoder("utf-8").decode(bytes);
+  } catch (_) {}
+  for (const label of ["gb18030", "gbk", "big5"]) {
+    try {
+      return new TextDecoder(label).decode(bytes);
+    } catch (_) {}
+  }
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+function paintPagedText(article, text, page) {
+  const total = Math.max(1, Math.ceil(text.length / NOVEL_PAGE_CHARS));
+  const idx = Math.min(Math.max(0, page), total - 1);
+  const slice = text.slice(idx * NOVEL_PAGE_CHARS, (idx + 1) * NOVEL_PAGE_CHARS);
+  article.style.whiteSpace = "pre-wrap";
+  article.replaceChildren();
+  const body = document.createElement("div");
+  body.textContent = slice || "（这一页没有文字）";
+  article.append(body);
+  if (total > 1) {
+    const nav = document.createElement("div");
+    nav.className = "pager";
+    const prev = document.createElement("button");
+    prev.type = "button";
+    prev.textContent = "上一页";
+    prev.disabled = idx === 0;
+    prev.onclick = () => {
+      paintPagedText(article, text, idx - 1);
+      article.scrollIntoView({ block: "start", behavior: "smooth" });
+    };
+    const meta = document.createElement("span");
+    meta.textContent = "第 " + (idx + 1) + " / " + total + " 页";
+    const next = document.createElement("button");
+    next.type = "button";
+    next.textContent = "下一页";
+    next.disabled = idx >= total - 1;
+    next.onclick = () => {
+      paintPagedText(article, text, idx + 1);
+      article.scrollIntoView({ block: "start", behavior: "smooth" });
+    };
+    nav.append(prev, meta, next);
+    article.append(nav);
+  }
 }
 
 async function openChapter(item, button, article, list, memoryKey) {
@@ -655,10 +770,23 @@ async function openChapter(item, button, article, list, memoryKey) {
       article.textContent = "这一章打不开（" + response.status + "）。换一章或返回重进摊位。";
       return;
     }
-    const text = await response.text();
-    if (item.path.toLowerCase().endsWith(".txt")) {
-      article.style.whiteSpace = "pre-wrap";
-      article.textContent = text;
+    const buffer = await response.arrayBuffer();
+    if (!buffer.byteLength) {
+      article.textContent = "这一章是空的。";
+      return;
+    }
+    const text = decodeTextBytes(buffer).replace(/^\uFEFF/, "");
+    if (!text.trim()) {
+      article.textContent = "解出来没有可读文字。若是扫描版，请改用文档主题看 PDF。";
+      return;
+    }
+    const lower = item.path.toLowerCase().split(/[?#]/)[0];
+    if (lower.endsWith(".txt")) {
+      paintPagedText(article, text, 0);
+      return;
+    }
+    if (text.length > NOVEL_PAGE_CHARS * 3) {
+      paintPagedText(article, text, 0);
       return;
     }
     article.innerHTML = markdown(text);
@@ -716,12 +844,47 @@ function renderDocs(host, items) {
   list.className = "list";
   const frame = document.createElement("iframe");
   frame.hidden = true;
-  function openDoc(item, button) {
-    frame.hidden = false;
-    frame.title = item.title;
-    frame.src = item.path;
+  const status = document.createElement("p");
+  status.className = "empty";
+  status.hidden = true;
+  let blobUrl = "";
+  let openToken = 0;
+  async function openDoc(item, button) {
+    const token = ++openToken;
     list.querySelectorAll(".row").forEach((node) => node.removeAttribute("aria-current"));
     button.setAttribute("aria-current", "true");
+    frame.hidden = true;
+    status.hidden = false;
+    status.textContent = "正在打开 " + item.title + "…";
+    if (blobUrl) {
+      URL.revokeObjectURL(blobUrl);
+      blobUrl = "";
+    }
+    try {
+      const res = await fetch(item.path);
+      if (token !== openToken) return;
+      if (!res.ok) {
+        const detail = (await res.text()).trim().slice(0, 160);
+        throw new Error(detail || ("打开失败 " + res.status));
+      }
+      const raw = await res.blob();
+      if (token !== openToken) return;
+      if (!raw.size) throw new Error("文件是空的");
+      const typed = raw.type && raw.type !== "application/octet-stream"
+        ? raw
+        : new Blob([raw], { type: "application/pdf" });
+      blobUrl = URL.createObjectURL(typed);
+      frame.title = item.title;
+      frame.src = blobUrl;
+      frame.hidden = false;
+      status.hidden = true;
+    } catch (error) {
+      if (token !== openToken) return;
+      frame.removeAttribute("src");
+      frame.hidden = true;
+      status.hidden = false;
+      status.textContent = (error && error.message) || "这份文档打不开";
+    }
   }
   items.forEach((item, index) => {
     const button = document.createElement("button");
@@ -734,7 +897,7 @@ function renderDocs(host, items) {
     list.append(button);
     if (items.length === 1) openDoc(item, button);
   });
-  host.append(list, frame);
+  host.append(list, status, frame);
 }
 
 function typing(event) {

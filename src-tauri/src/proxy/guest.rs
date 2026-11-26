@@ -176,9 +176,9 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
             .body(Body::empty())
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     }
-    // Buffer modest text/docs fully so WebView fetch()/iframe is not left with a
-    // truncated progressive body (common failure for novels and small PDFs).
-    const BUFFER_UP_TO: u64 = 8 * 1024 * 1024;
+    // Buffer text/docs/PDFs fully so WebView fetch()/iframe is not left with a
+    // truncated progressive body. PDFs especially go blank in iframe when short.
+    const BUFFER_UP_TO: u64 = 32 * 1024 * 1024;
     let should_buffer = head.content_length.is_some_and(|len| len > 0 && len <= BUFFER_UP_TO)
         && !head.content_type.starts_with("audio/")
         && !head.content_type.starts_with("video/");
