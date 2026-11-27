@@ -29,9 +29,7 @@
     --shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; min-height: 100%; }
-  /* Child webview: 100vh includes chrome outside the stage; use 100% of the webview. */
-  html, body { height: 100%; }
+  html, body { margin: 0; height: 100%; }
   body {
     background:
       radial-gradient(880px 380px at 0% -12%, rgba(196, 92, 38, 0.14), transparent 55%),
@@ -39,37 +37,106 @@
     color: var(--ink);
     font-family: var(--sans);
   }
+  /* Stage chrome already shows the title — never paint a second page header. */
+  body > header { display: none; }
+  main {
+    width: min(1240px, calc(100% - 1.5rem));
+    margin: 0 auto;
+    padding: 0.55rem 0 1rem;
+  }
+  /* Theme workspaces fill the child webview (no half-height gap / double scroll). */
   body[data-theme="novel"],
-  body[data-theme="document"] {
+  body[data-theme="document"],
+  body[data-theme="music"],
+  body[data-theme="video"] {
     overflow: hidden;
     display: flex;
     flex-direction: column;
   }
-  /* StageView already shows the stall title — hide the duplicate page header so
-     the native child webview cannot paint a giant h1 over the 返回 button. */
-  body > header { display: none; }
-  main { width: min(1240px, calc(100% - 1.5rem)); margin: 0 auto; padding: 0.55rem 0 1rem; }
   body[data-theme="novel"] main,
-  body[data-theme="document"] main {
+  body[data-theme="document"] main,
+  body[data-theme="music"] main,
+  body[data-theme="video"] main {
     flex: 1;
     min-height: 0;
-    display: flex;
-    flex-direction: column;
-    padding-bottom: 0.6rem;
-  }
-  body[data-theme="novel"] #stage,
-  body[data-theme="document"] #stage {
-    flex: 1;
-    min-height: 0;
+    width: auto;
+    max-width: none;
+    margin: 0;
+    padding: 0;
     display: flex;
     flex-direction: column;
   }
-  body[data-theme="novel"] #stage > div,
-  body[data-theme="document"] #stage > div {
+  .workspace {
     flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .workspace-bar {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.45rem 0.65rem;
+    padding: 0.5rem 0.85rem;
+    border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--card) 92%, var(--paper));
+  }
+  .workspace-bar .seg {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0.15rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+  }
+  .workspace-bar .seg button {
+    border: 0;
+    background: transparent;
+    border-radius: 999px;
+    padding: 0.28rem 0.65rem;
+    cursor: pointer;
+  }
+  .workspace-bar .seg button:hover {
+    background: color-mix(in srgb, var(--ember) 10%, var(--card));
+  }
+  .workspace-bar input[type="search"] {
+    width: min(280px, 42vw);
+    border: 1px solid var(--line);
+    background: var(--card);
+    border-radius: 999px;
+    padding: 0.4rem 0.8rem;
+    outline: none;
+  }
+  .workspace-bar input[type="search"]:focus { border-color: var(--ember); }
+  .workspace-bar .meta {
+    color: var(--muted);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .workspace-bar .tools {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0;
+    margin-left: auto;
+  }
+  .workspace .shelf,
+  .workspace .side {
+    min-height: 0;
+    overflow: auto;
+    padding: 0.45rem 0.35rem 0.6rem 0.55rem;
+    border-right: 1px solid var(--line);
+    background: color-mix(in srgb, var(--paper) 70%, var(--card));
+  }
+  .workspace .pane {
+    min-width: 0;
     min-height: 0;
     display: flex;
     flex-direction: column;
+    padding: 0.55rem 0.75rem 0.75rem;
   }
   button, input { font: inherit; color: inherit; }
   .find {
@@ -115,49 +182,112 @@
     cursor: pointer;
   }
   .photos img { display: block; width: 100%; height: 100%; object-fit: cover; }
-  .now {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    margin-bottom: 0.8rem;
-    padding: 0.95rem 1rem 1rem;
-    border: 1px solid var(--line);
-    border-radius: 1.2rem;
-    background: color-mix(in srgb, var(--card) 92%, transparent);
-    backdrop-filter: blur(12px);
-    box-shadow: var(--shadow);
+  .music-shell {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
-  .now-top { display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem; }
-  .kicker { margin: 0; color: var(--ember); font-size: 0.75rem; letter-spacing: 0.08em; }
+  .music-shell .workspace-bar { flex-shrink: 0; }
+  .music-shell .playlist {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 0.45rem 0.75rem 0.6rem;
+  }
+  .music-dock {
+    flex-shrink: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.75rem 1rem;
+    align-items: center;
+    padding: 0.65rem 0.9rem 0.75rem;
+    border-top: 1px solid var(--line);
+    background: color-mix(in srgb, var(--card) 94%, var(--paper));
+  }
+  .music-dock .now-copy { min-width: 0; }
+  .kicker { margin: 0; color: var(--ember); font-size: 0.72rem; letter-spacing: 0.06em; }
   #track-title {
-    margin: 0.15rem 0 0;
+    margin: 0.1rem 0 0;
     font-family: var(--serif);
-    font-size: clamp(1.35rem, 3vw, 1.9rem);
+    font-size: clamp(1.05rem, 2.2vw, 1.35rem);
     font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  #track-sub { margin: 0.25rem 0 0; min-height: 1.2em; color: var(--muted); font-size: 0.85rem; }
-  .transport { display: flex; gap: 0.45rem; }
-  .transport button, .tools button, #lightbox button {
+  #track-sub { margin: 0.15rem 0 0; min-height: 1.1em; color: var(--muted); font-size: 0.8rem; }
+  .music-dock .dock-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.45rem;
+    justify-content: flex-end;
+  }
+  .music-dock audio {
+    width: min(320px, 42vw);
+    margin: 0;
+    height: 2rem;
+  }
+  .cinema {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .cinema .workspace-bar { grid-column: 1 / -1; }
+  .cinema .side {
+    min-height: 0;
+    overflow: auto;
+    padding: 0.45rem 0.35rem 0.6rem 0.55rem;
+    border-right: 1px solid var(--line);
+    background: color-mix(in srgb, var(--paper) 40%, #0c0a08);
+  }
+  .cinema .stage-player {
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 0.65rem 0.85rem 0.85rem;
+    background: #0c0a08;
+    color: #f6efe4;
+  }
+  .cinema .stage-player .now-copy { margin-bottom: 0.55rem; }
+  .cinema .stage-player #track-sub { color: #b7a898; }
+  .transport { display: flex; flex-wrap: wrap; gap: 0.45rem; }
+  .transport button, .tools button, .dock-controls button, #lightbox button {
     border: 1px solid var(--line);
     background: var(--card);
     border-radius: 999px;
     padding: 0.4rem 0.85rem;
     cursor: pointer;
   }
-  audio, video { width: 100%; margin-top: 0.75rem; }
-  video {
+  .cinema .transport button {
+    border-color: #3a3128;
+    background: #221c16;
+    color: #f6efe4;
+  }
+  audio, video { width: 100%; }
+  .cinema video {
     display: block;
-    margin-top: 0;
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    margin: 0;
     background: #000;
-    border-radius: 1rem;
-    max-height: 68vh;
+    border-radius: 0.85rem;
+    object-fit: contain;
   }
   .screen {
     position: relative;
-    border-radius: 1rem;
+    flex: 1;
+    min-height: 0;
+    border-radius: 0.85rem;
     overflow: hidden;
-    background: #0c0a08;
-    min-height: 220px;
+    background: #000;
+    display: flex;
+    flex-direction: column;
   }
   .screen-empty {
     position: absolute;
@@ -220,27 +350,6 @@
   }
   .dl:hover { background: color-mix(in srgb, var(--ember) 18%, var(--card)); color: var(--ink); }
   .dl:disabled { opacity: 0.5; cursor: default; }
-  .reader {
-    display: grid;
-    grid-template-columns: minmax(260px, 38%) minmax(0, 1fr);
-    gap: 0.85rem;
-    align-items: stretch;
-    flex: 1;
-    min-height: 0;
-  }
-  .reader .shelf {
-    overflow: auto;
-    min-height: 0;
-    padding-right: 0.15rem;
-    border-right: 1px solid var(--line);
-  }
-  .read-pane {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    min-height: 0;
-    width: 100%;
-  }
   .pager {
     display: flex;
     flex-wrap: wrap;
@@ -248,7 +357,7 @@
     gap: 0.45rem;
     flex-shrink: 0;
     margin: 0 0 0.5rem;
-    padding: 0.4rem 0.55rem;
+    padding: 0.35rem 0.55rem;
     border: 1px solid var(--line);
     border-radius: 999px;
     background: var(--card);
@@ -273,17 +382,21 @@
     flex: 1;
     min-height: 0;
     overflow: auto;
+    width: min(100%, 42rem);
+    max-width: 72ch;
+    margin: 0 auto;
     background: var(--card);
     border: 1px solid var(--line);
-    border-radius: 1.2rem;
-    padding: clamp(1rem, 2.4vw, 1.8rem);
+    border-radius: 1rem;
+    padding: clamp(1.1rem, 2.4vw, 1.85rem);
     box-shadow: var(--shadow);
     font-family: var(--serif);
     font-size: var(--read, 1.12rem);
-    line-height: 1.95;
+    line-height: 1.85;
     overflow-wrap: anywhere;
-    max-width: 44rem;
   }
+  article p { margin: 0 0 0.95em; }
+  article p:last-child { margin-bottom: 0; }
   article h2, article h3 { font-weight: 500; line-height: 1.35; }
   article pre {
     overflow: auto;
@@ -295,25 +408,21 @@
     line-height: 1.5;
   }
   .tools { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0 0 0.55rem; flex-shrink: 0; }
-  .doc-layout {
-    display: grid;
-    grid-template-columns: minmax(260px, 38%) minmax(0, 1fr);
-    gap: 0.85rem;
-    align-items: stretch;
-    flex: 1;
-    min-height: 0;
-  }
-  .doc-layout .list { overflow: auto; min-height: 0; padding-right: 0.15rem; }
   .pdf-pane {
-    display: flex;
-    flex-direction: column;
+    flex: 1;
     min-width: 0;
     min-height: 0;
+    display: flex;
+    flex-direction: column;
     background: #2a241e;
     border-radius: 1rem;
     overflow: hidden;
   }
-  .pdf-pane .pager { border-color: #3a3128; color: #d9cbbd; padding-left: 0.75rem; padding-right: 0.75rem; }
+  .pdf-pane .pager {
+    border-color: #3a3128;
+    color: #d9cbbd;
+    margin: 0.55rem 0.55rem 0;
+  }
   .pdf-scroll {
     flex: 1;
     min-height: 0;
@@ -327,6 +436,14 @@
     height: auto;
     background: #fff;
     box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  }
+  .doc-status {
+    flex: 1;
+    display: grid;
+    place-items: center;
+    color: var(--muted);
+    padding: 1rem;
+    text-align: center;
   }
   iframe, embed { width: 100%; height: 78vh; border: 0; border-radius: 1rem; background: white; }
   #lightbox[hidden] { display: none; }
@@ -345,14 +462,30 @@
   #light-title { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .empty { color: var(--muted); padding: 1.5rem 0; }
   @media (max-width: 800px) {
-    body[data-theme="novel"],
-    body[data-theme="document"] {
-      overflow: auto;
+    .workspace {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto minmax(9rem, 32vh) minmax(0, 1fr);
     }
-    .reader, .doc-layout { grid-template-columns: 1fr; }
-    .reader .shelf, .doc-layout .list { max-height: 11rem; border-right: 0; }
-    .read-pane, .pdf-pane { min-height: 55vh; }
-    .now-top { grid-template-columns: 1fr; display: grid; }
+    .workspace .shelf,
+    .workspace .side {
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .workspace .pane { grid-row: 3; }
+    .cinema {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto minmax(8rem, 28vh) minmax(0, 1fr);
+    }
+    .cinema .side {
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .cinema .stage-player { grid-row: 3; }
+    .music-dock {
+      grid-template-columns: 1fr;
+    }
+    .music-dock .dock-controls { justify-content: flex-start; }
+    .music-dock audio { width: 100%; }
     .photos { grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); }
     .row.has-dl { grid-template-columns: 2rem minmax(0, 1fr) auto; }
     .row.has-dl .size { display: none; }
@@ -552,19 +685,29 @@ async function main() {
     stage.innerHTML = '<p class="empty">这个主题里还没有可以展示的文件。</p>';
     return;
   }
+  if (theme === "novel") {
+    renderNovel(stage, catalog.title || "", items, blurb);
+    return;
+  }
+  if (theme === "document") {
+    renderDocs(stage, items, blurb);
+    return;
+  }
+  if (theme === "music") {
+    renderMusic(stage, items, blurb);
+    return;
+  }
+  if (theme === "video") {
+    renderVideo(stage, items, blurb);
+    return;
+  }
   const host = document.createElement("div");
   stage.append(host);
   const note = document.createElement("p");
   note.className = "empty";
-  const persistent = theme === "music" ? renderMusic(host, items) : theme === "video" ? renderVideo(host, items) : null;
   const paint = (shown, hiddenNote) => {
-    if (persistent) persistent(shown);
-    else {
-      host.replaceChildren();
-      if (theme === "image") renderImages(host, shown);
-      else if (theme === "novel") renderNovel(host, catalog.title || "", shown);
-      else renderDocs(host, shown);
-    }
+    host.replaceChildren();
+    renderImages(host, shown);
     note.remove();
     if (hiddenNote) {
       note.textContent = hiddenNote;
@@ -580,34 +723,32 @@ async function main() {
     paint(shown, hidden > 0 ? "先列出 " + shown.length + " 个。用搜索把范围缩小。" : "");
     return matched.length;
   };
-  const bar = document.createElement("div");
-  bar.className = "find";
-  const input = document.createElement("input");
-  input.type = "search";
-  input.placeholder = "找文件名";
-  input.autocomplete = "off";
-  input.setAttribute("aria-label", "找文件名");
-  const meta = document.createElement("span");
-  const hint = document.createElement("span");
-  hint.className = "lede-inline";
-  hint.textContent = blurb;
   if (items.length >= 8) {
+    const bar = document.createElement("div");
+    bar.className = "find";
+    const input = document.createElement("input");
+    input.type = "search";
+    input.placeholder = "找文件名";
+    input.autocomplete = "off";
+    input.setAttribute("aria-label", "找文件名");
+    const meta = document.createElement("span");
+    const hint = document.createElement("span");
+    hint.className = "lede-inline";
+    hint.textContent = blurb;
     bar.append(input, meta, hint);
+    stage.insertBefore(bar, host);
     input.addEventListener("input", () => {
       query = input.value.trim().toLowerCase();
       meta.textContent = apply() + " / " + items.length;
     });
     meta.textContent = items.length + " 个";
-  } else {
-    bar.append(hint);
   }
-  stage.insertBefore(bar, host);
   apply();
   if (catalog.truncated) {
-    const note = document.createElement("p");
-    note.className = "empty";
-    note.textContent = "文件太多，这次只铺开了前面的一部分。";
-    stage.append(note);
+    const trunc = document.createElement("p");
+    trunc.className = "empty";
+    trunc.textContent = "文件太多，这次只铺开了前面的一部分。";
+    stage.append(trunc);
   }
 }
 
@@ -663,30 +804,57 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "ArrowRight") stepLight(1);
 });
 
-function renderMusic(host, all) {
-  const now = document.createElement("div");
-  now.className = "now";
-  now.innerHTML = '<div class="now-top"><div><p class="kicker" id="kicker">准备好了</p><h2 id="track-title">选一首</h2><p id="track-sub">不会自动出声。</p></div><div class="transport"><button type="button" id="prev">上一首</button><button type="button" id="next">下一首</button><button type="button" class="dl" id="save" disabled>↓ 下载</button></div></div>';
+function renderMusic(root, all, blurb) {
+  const shell = document.createElement("div");
+  shell.className = "music-shell";
+  const bar = document.createElement("div");
+  bar.className = "workspace-bar";
+  const input = document.createElement("input");
+  input.type = "search";
+  input.placeholder = "找曲目";
+  input.autocomplete = "off";
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  meta.textContent = blurb;
+  bar.append(input, meta);
+
+  const list = document.createElement("div");
+  list.className = "playlist list";
+
+  const dock = document.createElement("div");
+  dock.className = "music-dock";
+  dock.innerHTML =
+    '<div class="now-copy"><p class="kicker" id="kicker">准备好了</p><h2 id="track-title">选一首</h2><p id="track-sub">点曲目开始听 · 不会自动出声</p></div>' +
+    '<div class="dock-controls"><button type="button" id="prev">上一首</button><button type="button" id="next">下一首</button>' +
+    '<button type="button" id="loop" aria-pressed="false" title="循环">循环</button>' +
+    '<button type="button" class="dl" id="save" disabled>↓ 下载</button></div>';
   const audio = document.createElement("audio");
   audio.controls = true;
   audio.preload = "none";
-  now.append(audio);
-  const saveBtn = now.querySelector("#save");
+  dock.querySelector(".dock-controls").prepend(audio);
+
+  shell.append(bar, list, dock);
+  root.replaceChildren(shell);
+
+  let cursor = -1;
+  let loopMode = false;
+  const saveBtn = dock.querySelector("#save");
+  const loopBtn = dock.querySelector("#loop");
   saveBtn.onclick = () => {
     if (cursor < 0) return;
     void downloadItem(all[cursor], saveBtn);
   };
-  if (all.length >= 8) now.style.top = "3.2rem";
-  const list = document.createElement("div");
-  list.className = "list";
-  host.append(now, list);
-  let cursor = -1;
+  loopBtn.onclick = () => {
+    loopMode = !loopMode;
+    loopBtn.setAttribute("aria-pressed", loopMode ? "true" : "false");
+    loopBtn.textContent = loopMode ? "循环·开" : "循环";
+  };
 
   const sub = () => document.getElementById("track-sub");
   const showBuffer = () => {
     const title = audio.dataset.title || "";
     if (!audio.buffered.length || !isFinite(audio.duration) || audio.duration <= 0) {
-      sub().textContent = title ? "正在打开 " + title : "不会自动出声。";
+      sub().textContent = title ? "正在打开 " + title : "点曲目开始听 · 不会自动出声";
       return;
     }
     if (!audio.paused && audio.readyState >= 3) {
@@ -740,8 +908,6 @@ function renderMusic(host, all) {
     saveBtn.disabled = false;
     mark();
     try {
-      // Always pull the whole song into a blob. Progressive <audio src> against
-      // the guest proxy is flaky on WebView2 and was returning opaque 502s.
       const res = await fetch(item.path);
       if (token !== playToken) return;
       if (!res.ok) {
@@ -759,9 +925,13 @@ function renderMusic(host, all) {
       failPlay((error && error.message) || "请再点一次");
     }
   }
-  now.querySelector("#prev").onclick = () => playAt(cursor < 0 ? 0 : cursor - 1);
-  now.querySelector("#next").onclick = () => playAt(cursor < 0 ? 0 : cursor + 1);
+  dock.querySelector("#prev").onclick = () => playAt(cursor < 0 ? 0 : cursor - 1);
+  dock.querySelector("#next").onclick = () => playAt(cursor < 0 ? 0 : cursor + 1);
   audio.addEventListener("ended", () => {
+    if (loopMode && cursor >= 0) {
+      playAt(cursor);
+      return;
+    }
     if (cursor + 1 < all.length) playAt(cursor + 1);
     else document.getElementById("kicker").textContent = "最后一首听完了";
   });
@@ -775,7 +945,14 @@ function renderMusic(host, all) {
     if (event.key === "ArrowDown") { event.preventDefault(); playAt(cursor + 1); }
     if (event.key === "ArrowUp") { event.preventDefault(); playAt(cursor - 1); }
   });
-  return (shown) => {
+
+  const paint = () => {
+    const query = input.value.trim().toLowerCase();
+    const matched = query
+      ? all.filter((item) => String(item.title).toLowerCase().includes(query))
+      : all;
+    const shown = matched.slice(0, caps.music || 400);
+    meta.textContent = (query ? matched.length + " / " + all.length + " · " : "") + blurb;
     list.replaceChildren();
     shown.forEach((item) => {
       const index = all.indexOf(item);
@@ -786,9 +963,32 @@ function renderMusic(host, all) {
     });
     mark();
   };
+  input.addEventListener("input", paint);
+  paint();
 }
 
-function renderVideo(host, all) {
+function renderVideo(root, all, blurb) {
+  const cinema = document.createElement("div");
+  cinema.className = "cinema";
+  const bar = document.createElement("div");
+  bar.className = "workspace-bar";
+  const input = document.createElement("input");
+  input.type = "search";
+  input.placeholder = "找剧集 / 文件";
+  input.autocomplete = "off";
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  meta.textContent = blurb;
+  bar.append(input, meta);
+
+  const side = document.createElement("div");
+  side.className = "side list";
+
+  const player = document.createElement("div");
+  player.className = "stage-player";
+  const copy = document.createElement("div");
+  copy.className = "now-copy";
+  copy.innerHTML = '<p class="kicker" id="kicker">影院模式</p><p id="track-sub">点左侧一集再播</p>';
   const screen = document.createElement("div");
   screen.className = "screen";
   const video = document.createElement("video");
@@ -797,33 +997,37 @@ function renderVideo(host, all) {
   video.preload = "metadata";
   const empty = document.createElement("p");
   empty.className = "screen-empty";
-  empty.textContent = "点下面一集再播";
+  empty.textContent = "点左侧一集再播";
   screen.append(video, empty);
   const transport = document.createElement("div");
   transport.className = "transport";
-  transport.style.margin = "0.7rem 0";
-  transport.innerHTML = '<button type="button" id="prev">上一集</button><button type="button" id="next">下一集</button><button type="button" class="dl" id="save" disabled>↓ 下载</button>';
+  transport.style.marginTop = "0.65rem";
+  transport.innerHTML =
+    '<button type="button" id="prev">上一集</button><button type="button" id="next">下一集</button>' +
+    '<button type="button" class="dl" id="save" disabled>↓ 下载</button>';
+  player.append(copy, screen, transport);
+  cinema.append(bar, side, player);
+  root.replaceChildren(cinema);
+
   const saveBtn = transport.querySelector("#save");
+  const title = document.getElementById("track-sub");
+  let cursor = -1;
+  let blobUrl = "";
+  let playToken = 0;
   saveBtn.onclick = () => {
     if (cursor < 0) return;
     void downloadItem(all[cursor], saveBtn);
   };
-  const title = document.createElement("p");
-  title.id = "track-sub";
-  const list = document.createElement("div");
-  list.className = "list";
-  host.append(screen, transport, title, list);
-  let cursor = -1;
-  let blobUrl = "";
-  let playToken = 0;
+
   function mark() {
     const current = all[cursor];
-    list.querySelectorAll(".row").forEach((node) => {
+    side.querySelectorAll(".row").forEach((node) => {
       if (current && node.dataset.path === current.path) node.setAttribute("aria-current", "true");
       else node.removeAttribute("aria-current");
     });
   }
   function failPlay(message) {
+    document.getElementById("kicker").textContent = "播不了";
     title.textContent = message || "播不了，请再点一次";
   }
   async function playAt(index) {
@@ -832,6 +1036,7 @@ function renderVideo(host, all) {
     cursor = index;
     const item = all[index];
     empty.hidden = true;
+    document.getElementById("kicker").textContent = "正在播";
     title.textContent = "正在接通 " + item.title;
     title.title = item.title;
     saveBtn.disabled = false;
@@ -874,6 +1079,7 @@ function renderVideo(host, all) {
   }
   video.addEventListener("playing", () => {
     const item = all[cursor];
+    document.getElementById("kicker").textContent = "正在播";
     title.textContent = item ? displayName(item.title, 48) + " · " + formatSize(item.size) : "";
     title.title = item ? item.title : "";
   });
@@ -900,67 +1106,129 @@ function renderVideo(host, all) {
   });
   transport.querySelector("#prev").onclick = () => playAt(cursor < 0 ? 0 : cursor - 1);
   transport.querySelector("#next").onclick = () => playAt(cursor < 0 ? 0 : cursor + 1);
-  return (shown) => {
-    list.replaceChildren();
+
+  const paint = () => {
+    const query = input.value.trim().toLowerCase();
+    const matched = query
+      ? all.filter((item) => String(item.title).toLowerCase().includes(query))
+      : all;
+    const shown = matched.slice(0, caps.video || 400);
+    meta.textContent = (query ? matched.length + " / " + all.length + " · " : "") + blurb;
+    side.replaceChildren();
     shown.forEach((item) => {
       const index = all.indexOf(item);
-      list.append(makeFileRow(item, index, {
+      side.append(makeFileRow(item, index, {
         download: true,
         onOpen: (_item, _button, i) => playAt(i),
       }));
     });
     mark();
   };
+  input.addEventListener("input", paint);
+  paint();
 }
 
-function renderNovel(host, stallTitle, items) {
+function renderNovel(root, stallTitle, items, blurb) {
   const saved = Number(localStorage.getItem("popstall-read-size") || "18");
   document.documentElement.style.setProperty("--read", saved + "px");
   if (localStorage.getItem("popstall-paper") === "night") document.body.dataset.paper = "night";
+
+  const workspace = document.createElement("div");
+  workspace.className = "workspace";
+  const bar = document.createElement("div");
+  bar.className = "workspace-bar";
+  const input = document.createElement("input");
+  input.type = "search";
+  input.placeholder = "找章节";
+  input.autocomplete = "off";
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  meta.textContent = blurb;
   const tools = document.createElement("div");
   tools.className = "tools";
-  tools.innerHTML = '<button type="button" id="smaller">小一点</button><button type="button" id="larger">大一点</button><button type="button" id="paper">换纸色</button>';
-  const wrap = document.createElement("div");
-  wrap.className = "reader";
+  tools.innerHTML =
+    '<div class="seg"><button type="button" id="smaller" title="缩小字号">A-</button><button type="button" id="larger" title="放大字号">A+</button></div><button type="button" id="paper">护眼纸色</button><button type="button" class="dl" id="novel-save" disabled>↓ 下载</button>';
+  bar.append(input, meta, tools);
+
   const shelf = document.createElement("div");
   shelf.className = "shelf list";
   const pane = document.createElement("div");
-  pane.className = "read-pane";
+  pane.className = "pane";
   const pager = document.createElement("div");
   pager.className = "pager";
   pager.hidden = true;
   const article = document.createElement("article");
   article.textContent = "选一个章节。";
   pane.append(pager, article);
+  workspace.append(bar, shelf, pane);
+  root.replaceChildren(workspace);
+
   const memoryKey = "popstall-chapter:" + stallTitle;
   const pageKey = "popstall-page:" + stallTitle;
   const remembered = localStorage.getItem(memoryKey);
   let openItem = null;
   let openButton = null;
   let active = null;
-  items.forEach((item) => {
-    const button = document.createElement("button");
-    button.className = "row chapter";
-    button.type = "button";
-    button.title = item.title;
-    button.innerHTML = '<span class="name"></span>';
-    button.querySelector(".name").textContent = displayName(item.title, 48);
-    button.addEventListener("click", () => {
-      if (active && active.abort) active.abort();
-      active = openChapter(item, button, shelf, article, pager, memoryKey, pageKey);
+  const saveBtn = document.getElementById("novel-save");
+  saveBtn.onclick = () => {
+    if (!openItem) return;
+    void downloadItem(openItem, saveBtn);
+  };
+
+  const paintShelf = (shown) => {
+    shelf.replaceChildren();
+    let nextOpen = null;
+    let nextBtn = null;
+    shown.forEach((item) => {
+      const button = document.createElement("button");
+      button.className = "row chapter";
+      button.type = "button";
+      button.title = item.title;
+      button.dataset.path = item.path;
+      button.innerHTML = '<span class="name"></span>';
+      button.querySelector(".name").textContent = displayName(item.title, 52);
+      button.addEventListener("click", () => {
+        if (active && active.abort) active.abort();
+        openItem = item;
+        openButton = button;
+        saveBtn.disabled = false;
+        active = openChapter(item, button, shelf, article, pager, memoryKey, pageKey);
+      });
+      shelf.append(button);
+      if (!nextOpen && (!remembered || remembered === item.path)) {
+        nextOpen = item;
+        nextBtn = button;
+      }
     });
-    shelf.append(button);
-    if (!openItem && (!remembered || remembered === item.path)) {
-      openItem = item;
-      openButton = button;
+    if (!nextOpen && shown[0] && shelf.firstChild) {
+      nextOpen = shown[0];
+      nextBtn = shelf.firstChild;
     }
-  });
-  if (!openItem && items[0] && shelf.firstChild) {
-    openItem = items[0];
-    openButton = shelf.firstChild;
-  }
-  wrap.append(shelf, pane);
-  host.append(tools, wrap);
+    if (nextOpen && nextBtn && (!openItem || !shown.some((item) => item.path === openItem.path))) {
+      openItem = nextOpen;
+      openButton = nextBtn;
+      saveBtn.disabled = false;
+      active = openChapter(nextOpen, nextBtn, shelf, article, pager, memoryKey, pageKey);
+    } else if (openItem) {
+      shelf.querySelectorAll(".row").forEach((node) => {
+        if (node.dataset.path === openItem.path) node.setAttribute("aria-current", "true");
+        else node.removeAttribute("aria-current");
+      });
+    }
+  };
+
+  const apply = () => {
+    const query = input.value.trim().toLowerCase();
+    const matched = query
+      ? items.filter((item) => String(item.title).toLowerCase().includes(query))
+      : items;
+    const shown = matched.slice(0, caps.novel || 400);
+    meta.textContent =
+      (query ? matched.length + " / " + items.length + " · " : "") + blurb;
+    paintShelf(shown);
+  };
+  input.addEventListener("input", apply);
+
   document.getElementById("smaller").onclick = () => resize(-1);
   document.getElementById("larger").onclick = () => resize(1);
   document.getElementById("paper").onclick = () => {
@@ -980,11 +1248,7 @@ function renderNovel(host, stallTitle, items) {
       if (active && active.turn) active.turn(-1);
     }
   });
-  if (openItem && openButton) {
-    queueMicrotask(() => {
-      active = openChapter(openItem, openButton, shelf, article, pager, memoryKey, pageKey);
-    });
-  }
+  apply();
 }
 
 function resize(delta) {
@@ -1188,46 +1452,67 @@ async function loadPdfjs() {
   return pdfjsLib;
 }
 
-function renderDocs(host, items) {
-  const layout = document.createElement("div");
-  layout.className = "doc-layout";
-  const list = document.createElement("div");
-  list.className = "list";
+function renderDocs(root, items, blurb) {
+  const workspace = document.createElement("div");
+  workspace.className = "workspace";
+  const bar = document.createElement("div");
+  bar.className = "workspace-bar";
+  const input = document.createElement("input");
+  input.type = "search";
+  input.placeholder = "找文件名";
+  input.autocomplete = "off";
+  const barMeta = document.createElement("span");
+  barMeta.className = "meta";
+  barMeta.textContent = blurb;
+  const tools = document.createElement("div");
+  tools.className = "tools";
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "dl";
+  saveBtn.id = "doc-save";
+  saveBtn.textContent = "↓ 下载";
+  saveBtn.disabled = true;
+  tools.append(saveBtn);
+  bar.append(input, barMeta, tools);
+
+  const side = document.createElement("div");
+  side.className = "side list";
   const pane = document.createElement("div");
-  pane.className = "pdf-pane";
-  pane.hidden = true;
+  pane.className = "pane";
+  const pdfPane = document.createElement("div");
+  pdfPane.className = "pdf-pane";
+  pdfPane.hidden = true;
   const pager = document.createElement("div");
   pager.className = "pager";
   const scroll = document.createElement("div");
   scroll.className = "pdf-scroll";
   const canvas = document.createElement("canvas");
   scroll.append(canvas);
-  pane.append(pager, scroll);
-  const status = document.createElement("p");
-  status.className = "empty";
+  pdfPane.append(pager, scroll);
+  const status = document.createElement("div");
+  status.className = "doc-status";
   status.textContent = "选一份文档打开。";
+  pane.append(pdfPane, status);
+  workspace.append(bar, side, pane);
+  root.replaceChildren(workspace);
+
   let openToken = 0;
   let pdfDoc = null;
   let pageNo = 1;
+  let currentDoc = null;
   const prev = document.createElement("button");
   prev.type = "button";
   prev.textContent = "上一页";
-  const meta = document.createElement("span");
-  meta.className = "page-meta";
+  const pageMeta = document.createElement("span");
+  pageMeta.className = "page-meta";
   const next = document.createElement("button");
   next.type = "button";
   next.textContent = "下一页";
-  const saveBtn = document.createElement("button");
-  saveBtn.type = "button";
-  saveBtn.className = "dl";
-  saveBtn.textContent = "↓ 下载";
-  saveBtn.disabled = true;
-  let currentDoc = null;
+  pager.append(prev, pageMeta, next);
   saveBtn.onclick = () => {
     if (!currentDoc) return;
     void downloadItem(currentDoc, saveBtn);
   };
-  pager.append(prev, meta, next, saveBtn);
 
   async function paintPdfPage() {
     if (!pdfDoc) return;
@@ -1244,7 +1529,7 @@ function renderDocs(host, items) {
     const ctx = canvas.getContext("2d");
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     await page.render({ canvasContext: ctx, viewport }).promise;
-    meta.textContent = pageNo + " / " + pdfDoc.numPages;
+    pageMeta.textContent = pageNo + " / " + pdfDoc.numPages;
     prev.disabled = pageNo <= 1;
     next.disabled = pageNo >= pdfDoc.numPages;
     scroll.scrollTop = 0;
@@ -1265,9 +1550,9 @@ function renderDocs(host, items) {
     const token = ++openToken;
     currentDoc = item;
     saveBtn.disabled = false;
-    list.querySelectorAll(".row").forEach((node) => node.removeAttribute("aria-current"));
+    side.querySelectorAll(".row").forEach((node) => node.removeAttribute("aria-current"));
     button.setAttribute("aria-current", "true");
-    pane.hidden = true;
+    pdfPane.hidden = true;
     status.hidden = false;
     status.textContent = "正在拉取 " + item.title + "（" + formatSize(item.size) + "）…";
     pdfDoc = null;
@@ -1288,27 +1573,41 @@ function renderDocs(host, items) {
       pdfDoc = await task.promise;
       if (token !== openToken) return;
       pageNo = 1;
-      pane.hidden = false;
+      pdfPane.hidden = false;
       status.hidden = true;
       await paintPdfPage();
     } catch (error) {
       if (token !== openToken) return;
-      pane.hidden = true;
+      pdfPane.hidden = true;
       status.hidden = false;
       status.textContent = (error && error.message) || "这份文档打不开";
     }
   }
 
-  items.forEach((item, index) => {
-    const button = makeFileRow(item, index, {
-      download: true,
-      onOpen: (opened, row) => openDoc(opened, row),
+  const paintList = (shown) => {
+    side.replaceChildren();
+    shown.forEach((item, index) => {
+      const button = makeFileRow(item, index, {
+        download: true,
+        onOpen: (opened, row) => openDoc(opened, row),
+      });
+      side.append(button);
     });
-    list.append(button);
-    if (items.length === 1) openDoc(item, button);
-  });
-  layout.append(list, pane);
-  host.append(layout, status);
+    if (shown.length === 1) openDoc(shown[0], side.firstChild);
+  };
+
+  const apply = () => {
+    const query = input.value.trim().toLowerCase();
+    const matched = query
+      ? items.filter((item) => String(item.title).toLowerCase().includes(query))
+      : items;
+    const shown = matched.slice(0, caps.document || 200);
+    barMeta.textContent =
+      (query ? matched.length + " / " + items.length + " · " : "") + blurb;
+    paintList(shown);
+  };
+  input.addEventListener("input", apply);
+  apply();
 }
 
 function typing(event) {

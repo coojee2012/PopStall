@@ -60,20 +60,38 @@ pub fn attach_stage(app: &AppHandle, label: &str, target: &str, port: u16) -> an
 }
 
 /// Floor so a bad first layout cannot park the child webview over Stage chrome.
-const STAGE_CHROME_FLOOR: f64 = 52.0;
+const STAGE_CHROME_FLOOR: f64 = 56.0;
 
 pub fn place_stage(app: &AppHandle, label: &str, x: f64, y: f64, width: f64, height: f64) -> anyhow::Result<()> {
     let Some(webview) = app.get_webview(label) else {
         return Ok(());
     };
     let top = y.max(STAGE_CHROME_FLOOR);
+    let size = if let Some(window) = app.get_window("main") {
+        let (win_w, win_h) = stage_window_logical(&window);
+        (
+            width.max(1.0).min(win_w.max(1.0)),
+            height.max(1.0).min((win_h - top).max(1.0)),
+        )
+    } else {
+        (width.max(1.0), height.max(1.0))
+    };
     webview
         .set_position(LogicalPosition::new(x.max(0.0), top))
         .map_err(|err| anyhow::anyhow!("移动摊位页面失败: {err}"))?;
     webview
-        .set_size(LogicalSize::new(width.max(1.0), height.max(1.0)))
+        .set_size(LogicalSize::new(size.0, size.1))
         .map_err(|err| anyhow::anyhow!("调整摊位页面失败: {err}"))?;
     Ok(())
+}
+
+fn stage_window_logical(window: &tauri::Window) -> (f64, f64) {
+    let Ok(inner) = window.inner_size() else {
+        return (960.0, 640.0);
+    };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let logical: LogicalSize<f64> = inner.to_logical(scale);
+    (logical.width.max(1.0), logical.height.max(1.0))
 }
 
 pub fn close_stage_view(app: &AppHandle, label: &str) {
@@ -83,10 +101,6 @@ pub fn close_stage_view(app: &AppHandle, label: &str) {
 }
 
 fn stage_size(window: &tauri::Window) -> (f64, f64) {
-    let Ok(inner) = window.inner_size() else {
-        return (960.0, 640.0);
-    };
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let logical: LogicalSize<f64> = inner.to_logical(scale);
-    (logical.width.max(1.0), (logical.height - 56.0).max(1.0))
+    let (width, height) = stage_window_logical(window);
+    (width, (height - 56.0).max(1.0))
 }

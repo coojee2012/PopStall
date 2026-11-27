@@ -1,7 +1,9 @@
+import { Copy, Eye, Store } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useSession } from "../../stores/session";
 import { cn, errorText } from "../../lib/utils";
 import { Button } from "../ui/button";
+import { toast } from "../ui/toast";
 
 export function MyStallCard({ active, onOpen }: { active: boolean; onOpen: () => void }) {
   const host = useSession((state) => state.host);
@@ -11,8 +13,6 @@ export function MyStallCard({ active, onOpen }: { active: boolean; onOpen: () =>
   const openPreview = useSession((state) => state.openPreview);
   const stopHost = useSession((state) => state.stopHost);
   const [now, setNow] = useState(() => Date.now());
-  const [copied, setCopied] = useState(false);
-  const [copyError, setCopyError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!openedAt) {
@@ -28,60 +28,91 @@ export function MyStallCard({ active, onOpen }: { active: boolean; onOpen: () =>
     }
     try {
       await navigator.clipboard.writeText(host.shareCode);
-      setCopied(true);
-      setCopyError(null);
+      toast("分享码已复制");
     } catch (error) {
-      setCopied(false);
-      setCopyError(errorText(error));
+      toast(errorText(error), "warn");
     }
   }
 
   return (
-    <div className={cn("rounded-2xl border px-3 py-3", host ? "border-pine/25 bg-moss" : "border-dashed border-line bg-paper", active && "ring-1 ring-ember")}>
+    <div
+      className={cn(
+        "rounded-2xl border border-line bg-card p-3 shadow-[0_1px_2px_rgba(28,25,23,0.04)]",
+        active && "ring-1 ring-ember/30",
+      )}
+    >
       <button type="button" onClick={onOpen} className="w-full text-left">
         {host ? (
           <>
-            <span className="flex items-center gap-2 text-xs text-pine">
-              <span className="relative flex size-2">
-                <span className="absolute inline-flex size-full animate-ping rounded-full bg-pine opacity-60 motion-reduce:animate-none" />
-                <span className="relative size-2 rounded-full bg-pine" />
-              </span>
+            <span className="flex items-center gap-2 text-[11px] font-medium text-pine">
+              <span className="live-dot size-1.5 rounded-full bg-pine" />
               {host.locked ? "私密营业" : "营业中"}
             </span>
-            <span className="mt-1 block truncate font-serif text-xl">{stallName(host.root)}</span>
-            <span className="mt-1 block truncate text-xs text-muted">
+            <span className="mt-1.5 block truncate text-[15px] font-medium tracking-tight text-ink">
+              {stallName(host.root)}
+            </span>
+            <span className="mt-1 block truncate text-[12px] text-muted">
               {host.modeLabel}
               {openedAt ? ` · ${formatStay(openedAt, now)}` : ""}
             </span>
-            {blurb ? <span className="mt-2 block line-clamp-2 text-xs leading-5 text-ink">{blurb}</span> : null}
-            {host.relayReady ? null : <span className="mt-1 block text-xs text-ember-dark">中继还在接上</span>}
+            {blurb ? (
+              <span className="mt-2 block line-clamp-2 text-[12px] leading-5 text-ink/80">{blurb}</span>
+            ) : null}
+            {host.relayReady ? null : (
+              <span className="mt-1 block text-[11px] text-ember-dark">中继还在接上</span>
+            )}
           </>
         ) : (
           <>
-            <span className="block font-serif text-xl">今晚还没摆摊</span>
-            <span className="mt-1 block text-xs leading-5 text-muted">选一个文件夹，广场上的人就能进来。</span>
+            <span className="flex items-center gap-2 text-[11px] font-medium text-muted">
+              <Store className="size-3.5" />
+              我的摊位
+            </span>
+            <span className="mt-1.5 block text-[15px] font-medium tracking-tight text-ink">今晚还没摆摊</span>
+            <span className="mt-1 block text-[12px] leading-5 text-muted">
+              选文件夹或映射端口，广场上的人就能进来。
+            </span>
           </>
         )}
       </button>
       {host ? (
-        <div className="mt-3 flex flex-col gap-2">
-          <div className="flex gap-2">
-            <Button variant="quiet" className="flex-1 px-3 py-1.5 text-xs" onClick={() => void openPreview()}>
-              预览
-            </Button>
-            <Button variant="danger" className="flex-1 px-3 py-1.5 text-xs" disabled={busy} onClick={() => void stopHost()}>
-              {busy ? "打烊中" : "打烊"}
-            </Button>
-          </div>
-          <button type="button" onClick={() => void copyCode()} className="text-left text-xs text-pine">
-            {copied ? "分享码已复制" : "复制分享码"}
-          </button>
-          {copyError ? <p className="text-xs text-ember-dark">{copyError}</p> : null}
+        <div className="mt-3 grid grid-cols-3 gap-1.5">
+          <Button
+            variant="quiet"
+            size="sm"
+            className="gap-1 px-2"
+            onClick={() => void openPreview()}
+          >
+            <Eye className="size-3.5" />
+            预览
+          </Button>
+          <Button
+            variant="quiet"
+            size="sm"
+            className="gap-1 px-2"
+            onClick={() => void copyCode()}
+          >
+            <Copy className="size-3.5" />
+            分享
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
+            className="px-2"
+            disabled={busy}
+            onClick={() => void stopHost()}
+          >
+            {busy ? "…" : "打烊"}
+          </Button>
         </div>
       ) : (
-        <Button className="mt-3 w-full" onClick={onOpen}>
-          摆一摊
-        </Button>
+        <button
+          type="button"
+          onClick={onOpen}
+          className="mt-3 w-full rounded-xl border border-line px-3 py-2 text-left text-[12px] text-muted transition hover:bg-sidebar hover:text-ink"
+        >
+          管理摊位设置 →
+        </button>
       )}
     </div>
   );

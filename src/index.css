@@ -1,19 +1,26 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "Avenir Next", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
+  --font-sans: "SF Pro Text", "Avenir Next", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
   --font-serif: "Iowan Old Style", "Palatino Linotype", "Songti SC", "Noto Serif SC", serif;
-  --font-mono: "SF Mono", "Iowan Old Style", ui-monospace, monospace;
-  --color-ink: #241910;
-  --color-paper: #f3ecdf;
-  --color-card: #fffaf3;
-  --color-line: #e3d5c3;
-  --color-ember: #c45c26;
-  --color-ember-dark: #8d3e16;
-  --color-pine: #2f6b4f;
-  --color-moss: #e7f2ea;
-  --color-clay: #f8e6dc;
-  --color-muted: #7b6d60;
+  --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+
+  /* Surfaces */
+  --color-ink: #1c1917;
+  --color-paper: #faf8f5;
+  --color-sidebar: #f4f1ea;
+  --color-card: #ffffff;
+  --color-line: rgba(28, 25, 23, 0.08);
+  --color-line-strong: rgba(28, 25, 23, 0.14);
+
+  /* Brand + semantics */
+  --color-ember: #b45309;
+  --color-ember-dark: #9a3412;
+  --color-pine: #166534;
+  --color-moss: #ecfdf3;
+  --color-clay: #fff7ed;
+  --color-muted: #78716c;
+  --color-soft: #a8a29e;
 }
 
 html,
@@ -24,18 +31,27 @@ body,
 
 .plaza-scroll {
   scrollbar-width: thin;
-  scrollbar-color: #e3d5c3 transparent;
+  scrollbar-color: rgba(28, 25, 23, 0.16) transparent;
+}
+
+.plaza-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.plaza-scroll::-webkit-scrollbar-thumb {
+  background: rgba(28, 25, 23, 0.14);
+  border-radius: 999px;
 }
 
 body {
   margin: 0;
   overflow: hidden;
-  background:
-    radial-gradient(980px 460px at 6% -14%, rgba(196, 92, 38, 0.14), transparent 56%),
-    radial-gradient(760px 380px at 100% -10%, rgba(47, 107, 79, 0.1), transparent 48%),
-    var(--color-paper);
+  background: var(--color-paper);
   color: var(--color-ink);
   font-family: var(--font-sans);
+  font-feature-settings: "kern" 1, "liga" 1;
+  -webkit-font-smoothing: antialiased;
 }
 
 button,
@@ -45,5 +61,41 @@ input {
 }
 
 ::selection {
-  background: #f0c7b0;
+  background: #fed7aa;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.toast-enter {
+  animation: toast-in 180ms ease-out;
+}
+
+@keyframes pulse-live {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.live-dot {
+  animation: pulse-live 2.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot,
+  .toast-enter {
+    animation: none;
+  }
 }

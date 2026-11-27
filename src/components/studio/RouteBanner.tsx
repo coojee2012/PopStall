@@ -28,23 +28,23 @@ export function RouteBanner() {
 
   return (
     <div
-      className={`border-b px-5 py-3 text-sm leading-6 ${
-        viaHelper ? "border-pine/30 bg-moss/40 text-pine" : "border-ember/40 bg-clay text-ember-dark"
+      className={`border-b px-5 py-2.5 text-[12px] leading-5 ${
+        viaHelper ? "border-pine/20 bg-moss text-pine" : "border-ember/25 bg-clay text-ember-dark"
       }`}
     >
       {viaHelper ? (
         <>
           <p className="font-medium">这一趟走了互助中继</p>
-          <p>{pathLabel ?? "直连帮手在转发"}。列表里不含 n0 公共中继，只显示愿意帮忙的节点。</p>
+          <p className="opacity-90">{pathLabel ?? "直连帮手在转发"}。列表里不含 n0 公共中继。</p>
         </>
       ) : (
         <>
           <p className="font-medium">直连没有打通，现在走中继</p>
-          <p>
-            当前路径：{pathLabel ?? "公共中继"}。公共中继常被限速，所以影音会慢。
+          <p className="opacity-90">
+            当前路径：{pathLabel ?? "公共中继"}。公共中继常被限速，影音可能偏慢。
             {helperOffers > 0
-              ? " 下面是发现的互助帮手（不含打洞用的公用中继）；约每 45 秒会自动试一次可用的。"
-              : " 若有第三方打开「我来当中继」，会出现在列表里。摊主自己不能给自己的摊当桥。"}
+              ? " 下方是可用的互助帮手。"
+              : " 有第三方打开「我来当中继」时会出现在这里。"}
           </p>
         </>
       )}
