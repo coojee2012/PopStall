@@ -75,7 +75,7 @@ export function HostPanel() {
   const ready = appMode ? canOpen("app", Boolean(folder), Boolean(scan)) : canOpen(folderChoice, Boolean(folder), Boolean(scan));
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.4fr)_minmax(18rem,0.85fr)] 2xl:items-start">
     <Card className="flex flex-col gap-5">
       {host ? (
         <LiveStall
@@ -116,7 +116,7 @@ export function HostPanel() {
         <>
           <div>
             <h2 className="font-serif text-3xl font-medium tracking-tight">{scan?.folderName ?? "摆一摊"}</h2>
-            <p className="mt-2 max-w-xl text-sm leading-6 text-muted">
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">
               {scan ? scanSummary(scan) : "选一个文件夹。里面是什么，就按什么摆出去。"}
             </p>
           </div>
@@ -171,6 +171,15 @@ export function HostPanel() {
             <p className="text-sm leading-6 text-muted">这个文件夹里没有图片、音乐、视频、小说、文档，也没有网站首页。</p>
           ) : null}
 
+          {folderChoice === "site" ? (
+            <div className="rounded-2xl border border-line bg-sidebar px-4 py-3 text-[13px] leading-6 text-muted">
+              <p className="font-medium text-ink">原样网站 = 只托管静态文件</p>
+              <p className="mt-1">
+                没有后端进程。若站点依赖 API / 登录 / WebSocket，请改用「转发本机端口」：本机先把前后端跑起来，再填那个端口。
+              </p>
+            </div>
+          ) : null}
+
           {scan && options.length > 0 ? (
             <Button className="w-full py-2.5" onClick={() => void startHost()} disabled={busy || scanning || !ready}>
               {busy ? "正在开张" : openLabel(folderChoice, scan)}
@@ -186,8 +195,18 @@ export function HostPanel() {
             onPassword={setPassword}
           />
 
-          <button type="button" onClick={() => { setAppMode(true); setChoice("app"); }} className="self-start text-sm text-muted hover:text-ink">
-            文件夹用不上？转发本机已经打开的网页
+          <button
+            type="button"
+            onClick={() => {
+              setAppMode(true);
+              setChoice("app");
+            }}
+            className="rounded-2xl border border-dashed border-line-strong bg-card/80 px-4 py-3 text-left transition hover:border-ember/40 hover:bg-clay/40"
+          >
+            <span className="block text-[13px] font-medium text-ink">有后端 API？转发本机端口</span>
+            <span className="mt-1 block text-[12px] leading-5 text-muted">
+              Next / Vite / Docker / 本地服务先在本机跑着，闪摊只做加密转发。适合带接口的完整网站。
+            </span>
           </button>
         </>
       )}
@@ -225,13 +244,20 @@ function AppSetup({
   return (
     <>
       <div>
-        <h2 className="font-serif text-3xl font-medium tracking-tight">转发本机网页</h2>
-        <p className="mt-2 text-sm leading-6 text-muted">本机已经在跑的页面，从这里转给朋友。页面和接口可以打开，里面的 WebSocket 热更新还不行。</p>
+        <h2 className="font-serif text-3xl font-medium tracking-tight">转发本机端口</h2>
+        <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">
+          本机先跑完整站点（前端 + API），再填监听端口。页面、同源接口、WebSocket 都会经闪摊加密转给访客。
+        </p>
+      </div>
+      <div className="rounded-2xl border border-line bg-sidebar px-4 py-3 text-[12px] leading-5 text-muted">
+        <p>· 前端请求请用相对路径（如 <code className="font-mono text-[11px] text-ink">/api/...</code>），不要写死其它 localhost 端口。</p>
+        <p className="mt-1">· 只转发你信任的开发服或自建站点；不要转发数据库、管理后台或未鉴权服务。</p>
+        <p className="mt-1">· 访客侧是系统 WebView（macOS WKWebView / Windows WebView2），不是完整 Chrome 扩展环境。</p>
       </div>
       <label className="flex items-center justify-between gap-3 rounded-[1.3rem] border border-line bg-paper px-4 py-4">
         <span>
-          <span className="block text-xs text-muted">端口</span>
-          <span className="mt-1 block text-sm text-muted">不要转发数据库、后台，或默认信任本机的服务。</span>
+          <span className="block text-xs text-muted">本机端口</span>
+          <span className="mt-1 block text-sm text-muted">例如 Vite 5173、Next 3000、你自己的后端端口。</span>
         </span>
         <input
           value={port}

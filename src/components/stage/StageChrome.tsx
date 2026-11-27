@@ -59,9 +59,12 @@ export function StageChrome({
           </p>
         </div>
         {isSite ? (
-          <span className="hidden items-center gap-1 text-[11px] text-soft sm:inline-flex">
-            <ExternalLink className="size-3" strokeWidth={1.75} />
-            沙箱内浏览
+          <span
+            className="hidden max-w-[14rem] items-center gap-1 truncate text-[11px] text-soft xl:inline-flex 2xl:max-w-none"
+            title="系统 WebView 沙箱：同源 API/WS 可走代理；无浏览器扩展，外链窗口已拦截"
+          >
+            <ExternalLink className="size-3 shrink-0" strokeWidth={1.75} />
+            WebView 沙箱 · 同源可访问
           </span>
         ) : null}
         {extra}

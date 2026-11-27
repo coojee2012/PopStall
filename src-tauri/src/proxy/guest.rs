@@ -100,6 +100,10 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
     }
     let path_only = target.split(['?', '#']).next().unwrap_or(target.as_str());
     if matches!(method, Method::Get | Method::Head) {
+        // Save is intercepted by the stage webview navigation hook (system dialog).
+        if path_only == "/_stall/save-as" {
+            return StatusCode::NO_CONTENT.into_response();
+        }
         // Exhibition shell comes from this build — not the remote host — so UI
         // fixes (download, layout) apply when visiting older stalls.
         if path_only == "/" || path_only == "/index.html" {

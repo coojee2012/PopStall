@@ -81,7 +81,7 @@ export default function App() {
         </div>
 
         {browsing ? (
-          <label className="relative mx-auto w-full max-w-md min-w-0">
+          <label className="relative mx-auto w-full max-w-md min-w-0 xl:max-w-xl 2xl:max-w-2xl">
             <Search className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-soft" strokeWidth={1.75} />
             <input
               ref={searchRef}
@@ -161,8 +161,8 @@ export default function App() {
       {stage ? null : <RouteBanner />}
 
       <div className="flex min-h-0 flex-1">
-        <aside className="plaza-scroll flex min-h-0 w-[15.5rem] shrink-0 flex-col overflow-y-auto border-r border-line bg-sidebar">
-          <nav className="flex flex-col gap-0.5 px-2.5 pt-3">
+        <aside className="plaza-scroll flex min-h-0 w-[15.5rem] shrink-0 flex-col overflow-y-auto border-r border-line bg-sidebar xl:w-[17.5rem] 2xl:w-72">
+          <nav className="flex flex-col gap-0.5 px-2.5 pt-3 xl:px-3">
             <NavButton
               active={desk === "market"}
               icon={<Store className="size-4" strokeWidth={1.5} />}
@@ -197,7 +197,7 @@ export default function App() {
               onClick={() => setDesk("help")}
             />
           </nav>
-          <div className="mt-auto flex flex-col gap-2 px-2.5 pt-4 pb-4">
+          <div className="mt-auto flex flex-col gap-2 px-2.5 pt-4 pb-4 xl:px-3">
             <MyStallCard active={desk === "stall"} onOpen={() => setDesk("stall")} />
             <button
               type="button"
@@ -210,8 +210,8 @@ export default function App() {
           </div>
         </aside>
         {desk === "stall" ? (
-          <div className="plaza-scroll min-h-0 min-w-0 flex-1 overflow-y-auto bg-paper px-6 py-6">
-            <div className="mx-auto w-full max-w-3xl">
+          <div className="plaza-scroll min-h-0 min-w-0 flex-1 overflow-y-auto bg-paper px-6 py-6 xl:px-10 xl:py-8">
+            <div className="mx-auto w-full max-w-3xl 2xl:max-w-5xl">
               <HostPanel />
             </div>
           </div>

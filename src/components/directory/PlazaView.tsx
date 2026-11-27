@@ -193,7 +193,7 @@ export function PlazaView({
             />
           ) : view === "grid" ? (
             <div className="plaza-scroll h-full overflow-y-auto pr-1">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                 {stallRows.map((row) => (
                   <StallCard
                     key={row.stall.endpointId}

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode, header};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde::Serialize;
@@ -234,6 +234,14 @@ async fn serve_exhibition(
             catalog.as_bytes(),
         );
     }
+    // Save is handled by the stage navigation hook (system dialog). This route
+    // exists so a missed intercept does not wipe the exhibit with a 404 page.
+    if path_only == "/_stall/save-as" {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    if let Some(rest) = path_only.strip_prefix("/_stall/thumb/") {
+        return serve_thumb(&method, root.as_path(), theme, rest).await;
+    }
     if let Some((bytes, content_type)) = crate::server::stall_asset(path_only) {
         return bytes_response(&method, StatusCode::OK, content_type, bytes);
     }
@@ -257,6 +265,44 @@ fn theme_allows(theme: Theme, path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| theme.matches(ext))
+}
+
+/// `/_stall/thumb/media/...` → small JPEG for the photo grid (original stays for lightbox).
+async fn serve_thumb(method: &Method, root: &Path, theme: Theme, rest: &str) -> Response {
+    if theme != Theme::Image {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(media_rest) = rest.strip_prefix("media/") else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if media_rest.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let resolved = match resolve_within_root(root, &format!("/{media_rest}")) {
+        Ok(ResolvedPath::File(path)) if theme_allows(theme, &path) => path,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let path = resolved;
+    let bytes = match tokio::task::spawn_blocking(move || crate::server::cached_jpeg_thumb(&path)).await
+    {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            tracing::warn!(%err, "thumb worker failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let mut response = bytes_response(
+        method,
+        StatusCode::OK,
+        crate::server::thumb_content_type(),
+        &bytes,
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=86400"),
+    );
+    response
 }
 
 async fn serve_file(method: &Method, path: PathBuf, range_header: Option<&str>) -> Response {

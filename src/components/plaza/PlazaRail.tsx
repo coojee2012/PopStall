@@ -15,7 +15,7 @@ export function PlazaRail({
   trail: { id: string; title: string; label: string; onOpen: () => void; live: boolean }[];
 }) {
   return (
-    <aside className="hidden w-[15.5rem] shrink-0 flex-col gap-4 xl:flex">
+    <aside className="hidden w-[15.5rem] shrink-0 flex-col gap-4 xl:flex 2xl:w-[17rem]">
       <section className="rounded-2xl border border-line bg-card p-4 shadow-[0_1px_2px_rgba(28,25,23,0.04)]">
         <p className="text-[11px] font-medium tracking-wide text-ember">快速开摊</p>
         <p className="mt-1 text-[13px] leading-5 text-muted">

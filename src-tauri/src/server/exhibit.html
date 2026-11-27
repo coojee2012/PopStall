@@ -451,15 +451,46 @@
     position: fixed;
     inset: 0;
     z-index: 5;
-    background: rgba(12, 9, 7, 0.92);
+    background: rgba(12, 9, 7, 0.94);
     display: grid;
-    grid-template-rows: auto 1fr auto;
-    padding: 0.8rem 1rem 1rem;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    padding: 0.65rem 0.85rem 0.85rem;
     color: #f6efe4;
+    gap: 0.45rem;
   }
-  #lightbox img { max-width: min(1200px, 100%); max-height: 100%; margin: auto; object-fit: contain; cursor: pointer; }
-  #lightbox header, .nav { width: min(1200px, 100%); margin: 0 auto; display: flex; justify-content: space-between; align-items: center; gap: 0.6rem; }
-  #light-title { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #lightbox header, .nav {
+    width: min(1200px, 100%);
+    margin: 0 auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+  #light-title { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  #light-viewport {
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    border-radius: 0.75rem;
+    background: #0a0806;
+    cursor: grab;
+    display: grid;
+    place-items: center;
+  }
+  #light-viewport.is-panning { cursor: grabbing; }
+  #light-img {
+    display: block;
+    max-width: none;
+    max-height: none;
+    width: auto;
+    height: auto;
+    margin: 0;
+    user-select: none;
+    -webkit-user-drag: none;
+    transform-origin: center center;
+  }
+  #lightbox .zoom-tools { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
   .empty { color: var(--muted); padding: 1.5rem 0; }
   @media (max-width: 800px) {
     .workspace {
@@ -501,9 +532,18 @@
 <div id="lightbox" hidden>
   <header>
     <p id="light-title"></p>
-    <button id="light-close" type="button">关闭</button>
+    <div class="zoom-tools">
+      <button id="light-zoom-out" type="button" title="缩小">−</button>
+      <button id="light-zoom-fit" type="button" title="适应窗口">适应</button>
+      <button id="light-zoom-100" type="button" title="实际大小">100%</button>
+      <button id="light-zoom-in" type="button" title="放大">+</button>
+      <button id="light-save" type="button" class="dl">↓ 下载</button>
+      <button id="light-close" type="button">关闭</button>
+    </div>
   </header>
-  <img id="light-img" alt="">
+  <div id="light-viewport">
+    <img id="light-img" alt="">
+  </div>
   <div class="nav">
     <button id="light-prev" type="button">上一张</button>
     <span id="light-count"></span>
@@ -515,11 +555,11 @@ const theme = document.body.dataset.theme;
 const stage = document.getElementById("stage");
 const lede = document.getElementById("lede");
 const hints = {
-  image: "点开看大图，左右键换一张。",
-  music: "点一首听；列表或播放条可下载到本地。",
-  video: "点一集再播；可下载到本地。",
+  image: "网格是缩略图；点开看原图，可缩放拖拽，也可下载。",
+  music: "点一首听；下载会弹出系统保存位置。",
+  video: "点一集再播；下载会弹出系统保存位置。",
   novel: "从左边选章节。字号和纸色会记住。",
-  document: "选一份打开；可下载到本地。"
+  document: "选一份打开；下载会弹出系统保存位置。"
 };
 const caps = { image: 360, music: 400, video: 200, novel: 400, document: 200 };
 
@@ -566,50 +606,37 @@ function fileNameForSave(title, path) {
   return cleaned + ext;
 }
 
-function clickDownload(href, filename) {
-  const a = document.createElement("a");
-  a.href = href;
-  a.download = filename;
-  a.rel = "noopener";
-  document.body.append(a);
-  a.click();
-  a.remove();
-}
-
-async function downloadItem(item, trigger) {
+/** Stage webview has no Tauri IPC — navigate to save-as; Rust intercepts and opens a save dialog. */
+function downloadItem(item, trigger) {
   if (!item || !item.path) return;
   const button = trigger || null;
   const previous = button ? button.textContent : "";
   const filename = fileNameForSave(item.title, item.path);
-  const size = Number(item.size) || 0;
+  const url = "/_stall/save-as?path=" + encodeURIComponent(item.path) +
+    "&name=" + encodeURIComponent(filename);
   if (button) {
     button.disabled = true;
-    button.textContent = "…";
+    button.textContent = "选位置…";
   }
   try {
-    // Big media: stream via <a download> so we do not hold the whole file in RAM.
-    if (size > 48 * 1024 * 1024) {
-      clickDownload(item.path, filename);
-      return;
-    }
-    const res = await fetch(item.path);
-    if (!res.ok) {
-      const detail = (await res.text()).trim().slice(0, 120);
-      throw new Error(detail || ("下载失败 " + res.status));
-    }
-    const blob = await res.blob();
-    if (!blob.size) throw new Error("文件是空的");
-    const url = URL.createObjectURL(blob);
-    clickDownload(url, filename);
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    // Assign is cancelled by the stage navigation hook; the page stays put.
+    window.location.assign(url);
   } catch (error) {
     window.alert((error && error.message) || "下载失败");
   } finally {
-    if (button) {
-      button.disabled = false;
-      button.textContent = previous || "下载";
-    }
+    window.setTimeout(() => {
+      if (button) {
+        button.disabled = false;
+        button.textContent = previous || "↓ 下载";
+      }
+    }, 800);
   }
+}
+
+function thumbPath(mediaPath) {
+  const path = String(mediaPath || "");
+  if (!path.startsWith("/media/")) return path;
+  return "/_stall/thumb" + path;
 }
 
 function makeFileRow(item, index, options) {
@@ -763,7 +790,11 @@ function renderImages(host, items) {
     img.alt = item.title;
     img.loading = "lazy";
     img.decoding = "async";
-    img.src = item.path;
+    img.src = thumbPath(item.path);
+    img.onerror = () => {
+      img.onerror = null;
+      img.src = item.path;
+    };
     button.append(img);
     button.addEventListener("click", () => openLight(items, index));
     grid.append(button);
@@ -773,6 +804,12 @@ function renderImages(host, items) {
 
 let lightIndex = 0;
 let lightItems = [];
+let lightZoom = 1;
+let lightFit = true;
+let lightNatural = { w: 0, h: 0 };
+const lightViewport = document.getElementById("light-viewport");
+const lightImg = document.getElementById("light-img");
+
 function openLight(items, index) {
   lightItems = items;
   lightIndex = index;
@@ -781,16 +818,89 @@ function openLight(items, index) {
 }
 function paintLight() {
   const item = lightItems[lightIndex];
-  const img = document.getElementById("light-img");
-  img.src = item.path;
-  img.alt = item.title;
+  lightFit = true;
+  lightZoom = 1;
+  lightNatural = { w: 0, h: 0 };
+  lightImg.style.width = "";
+  lightImg.style.height = "";
+  lightImg.onload = () => {
+    lightNatural = { w: lightImg.naturalWidth || 0, h: lightImg.naturalHeight || 0 };
+    applyLightZoom();
+  };
+  lightImg.src = item.path;
+  lightImg.alt = item.title;
   document.getElementById("light-title").textContent = item.title + " · " + formatSize(item.size);
   document.getElementById("light-count").textContent = (lightIndex + 1) + " / " + lightItems.length;
+}
+function applyLightZoom() {
+  if (!lightNatural.w || !lightNatural.h) return;
+  const pad = 8;
+  const availW = Math.max(80, lightViewport.clientWidth - pad);
+  const availH = Math.max(80, lightViewport.clientHeight - pad);
+  let scale = lightZoom;
+  if (lightFit) {
+    scale = Math.min(1, availW / lightNatural.w, availH / lightNatural.h);
+    lightZoom = scale;
+  }
+  const w = Math.max(1, Math.round(lightNatural.w * scale));
+  const h = Math.max(1, Math.round(lightNatural.h * scale));
+  lightImg.style.width = w + "px";
+  lightImg.style.height = h + "px";
+}
+function setLightZoom(next, asFit) {
+  lightFit = !!asFit;
+  lightZoom = Math.min(6, Math.max(0.05, next));
+  applyLightZoom();
 }
 document.getElementById("light-close").onclick = () => { document.getElementById("lightbox").hidden = true; };
 document.getElementById("light-prev").onclick = () => stepLight(-1);
 document.getElementById("light-next").onclick = () => stepLight(1);
-document.getElementById("light-img").onclick = () => stepLight(1);
+document.getElementById("light-zoom-in").onclick = () => setLightZoom(lightZoom * 1.25, false);
+document.getElementById("light-zoom-out").onclick = () => setLightZoom(lightZoom / 1.25, false);
+document.getElementById("light-zoom-fit").onclick = () => { lightFit = true; applyLightZoom(); };
+document.getElementById("light-zoom-100").onclick = () => setLightZoom(1, false);
+document.getElementById("light-save").onclick = () => {
+  const item = lightItems[lightIndex];
+  if (item) downloadItem(item, document.getElementById("light-save"));
+};
+lightViewport.addEventListener("wheel", (event) => {
+  if (document.getElementById("lightbox").hidden) return;
+  if (!(event.ctrlKey || event.metaKey)) return;
+  event.preventDefault();
+  const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
+  setLightZoom(lightZoom * factor, false);
+}, { passive: false });
+(function bindLightPan() {
+  let dragging = false;
+  let startX = 0;
+  let startY = 0;
+  let scrollL = 0;
+  let scrollT = 0;
+  lightViewport.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    dragging = true;
+    lightViewport.classList.add("is-panning");
+    startX = event.clientX;
+    startY = event.clientY;
+    scrollL = lightViewport.scrollLeft;
+    scrollT = lightViewport.scrollTop;
+    lightViewport.setPointerCapture(event.pointerId);
+  });
+  lightViewport.addEventListener("pointermove", (event) => {
+    if (!dragging) return;
+    lightViewport.scrollLeft = scrollL - (event.clientX - startX);
+    lightViewport.scrollTop = scrollT - (event.clientY - startY);
+  });
+  const endPan = () => {
+    dragging = false;
+    lightViewport.classList.remove("is-panning");
+  };
+  lightViewport.addEventListener("pointerup", endPan);
+  lightViewport.addEventListener("pointercancel", endPan);
+})();
+window.addEventListener("resize", () => {
+  if (!document.getElementById("lightbox").hidden && lightFit) applyLightZoom();
+});
 function stepLight(delta) {
   if (!lightItems.length) return;
   lightIndex = (lightIndex + delta + lightItems.length) % lightItems.length;
@@ -802,6 +912,9 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") box.hidden = true;
   if (event.key === "ArrowLeft") stepLight(-1);
   if (event.key === "ArrowRight") stepLight(1);
+  if (event.key === "+" || event.key === "=") setLightZoom(lightZoom * 1.25, false);
+  if (event.key === "-" || event.key === "_") setLightZoom(lightZoom / 1.25, false);
+  if (event.key === "0") { lightFit = true; applyLightZoom(); }
 });
 
 function renderMusic(root, all, blurb) {

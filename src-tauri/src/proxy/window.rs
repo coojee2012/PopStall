@@ -5,6 +5,8 @@ use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, WebviewUrl};
 
 use crate::security::navigation_allowed;
 
+use super::{save_as_request, save_from_stage};
+
 const ISOLATION_SCRIPT: &str = r#"
 (() => {
   const lock = (key) => {
@@ -40,6 +42,7 @@ pub fn attach_stage(app: &AppHandle, label: &str, target: &str, port: u16) -> an
         .get_window("main")
         .ok_or_else(|| anyhow::anyhow!("找不到闪摊窗口"))?;
     let (width, height) = stage_size(&window);
+    let app_handle = app.clone();
     window
         .add_child(
             WebviewBuilder::new(label, WebviewUrl::External(url))
@@ -48,7 +51,21 @@ pub fn attach_stage(app: &AppHandle, label: &str, target: &str, port: u16) -> an
                 .disable_drag_drop_handler()
                 .initialization_script(ISOLATION_SCRIPT)
                 .initialization_script_for_all_frames(ISOLATION_SCRIPT)
-                .on_navigation(move |next| navigation_allowed(next, port))
+                .on_navigation(move |next| {
+                    if let Some((media_path, file_name)) = save_as_request(&next, port) {
+                        let app = app_handle.clone();
+                        let origin = format!("http://127.0.0.1:{port}");
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(err) =
+                                save_from_stage(app, origin, media_path, file_name).await
+                            {
+                                tracing::warn!(%err, "stall save-as failed");
+                            }
+                        });
+                        return false;
+                    }
+                    navigation_allowed(&next, port)
+                })
                 .on_new_window(|_url, _features| NewWindowResponse::Deny)
                 .background_color(Color(0xf3, 0xec, 0xdf, 255)),
             // Match StageView header (h-14 ≈ 56px). place_stage corrects once layout settles.

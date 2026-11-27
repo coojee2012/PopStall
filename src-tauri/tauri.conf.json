@@ -14,10 +14,11 @@
       {
         "label": "main",
         "title": "闪摊",
-        "width": 1160,
-        "height": 860,
-        "minWidth": 920,
-        "minHeight": 700
+        "width": 1440,
+        "height": 960,
+        "minWidth": 1024,
+        "minHeight": 720,
+        "maximized": true
       }
     ],
     "security": {

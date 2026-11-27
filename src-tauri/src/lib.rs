@@ -28,6 +28,9 @@ pub fn run() {
             std::fs::create_dir_all(&dir)?;
             crate::netdebug::init(&dir);
             app.manage(AppState::new(dir));
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.maximize();
+            }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
