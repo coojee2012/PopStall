@@ -3,14 +3,19 @@ import { useEffect, useRef, useState } from "react";
 import { traffic } from "../../lib/api";
 import { useRouteStore } from "../../stores/route";
 import { useSession } from "../../stores/session";
-import { cn, errorText } from "../../lib/utils";
+import { cn, errorText, routeStatusNote } from "../../lib/utils";
 import { toast } from "../ui/toast";
 
 export function StatusCapsule() {
   const host = useSession((state) => state.host);
+  const stage = useSession((state) => state.stage);
   const pathLabel = useRouteStore((state) => state.pathLabel);
+  const pathTrust = useRouteStore((state) => state.pathTrust);
   const relayOnly = useRouteStore((state) => state.relayOnly);
   const viaHelper = useRouteStore((state) => state.viaHelper);
+  const digestVerified = useRouteStore((state) => state.digestVerified);
+  const retryCount = useRouteStore((state) => state.retryCount);
+  const degraded = useRouteStore((state) => state.degraded);
   const [open, setOpen] = useState(false);
   const [rates, setRates] = useState({ up: 0, down: 0 });
   const root = useRef<HTMLDivElement>(null);
@@ -62,7 +67,18 @@ export function StatusCapsule() {
   }, [open]);
 
   const live = Boolean(host);
-  const path = viaHelper ? "互助中继" : relayOnly ? "公共中继" : pathLabel || "直连";
+  const active = Boolean(host || stage);
+  const status = routeStatusNote({
+    pathTrust,
+    pathLabel,
+    viaHelper,
+    relayOnly,
+    digestVerified,
+    retryCount,
+    degraded,
+  });
+  const showCapsuleWarnings =
+    active && status.warnings.length > 0 && status.kind !== "helper" && status.kind !== "relay";
 
   async function copyShare() {
     if (!host) {
@@ -94,6 +110,14 @@ export function StatusCapsule() {
           )}
         />
         <span className="text-[12px] font-medium text-ink">{live ? "营业中" : "未开摊"}</span>
+        {showCapsuleWarnings ? (
+          <span
+            className="rounded-full bg-clay px-1.5 py-0.5 text-[10px] font-medium text-ember-dark"
+            title={status.warnings.join(" · ")}
+          >
+            需检查
+          </span>
+        ) : null}
         <span className="hidden h-3 w-px bg-line sm:block" />
         <span className="hidden font-mono text-[11px] text-muted tabular-nums sm:inline">
           ↑ {formatRate(rates.up)}
@@ -109,7 +133,19 @@ export function StatusCapsule() {
             <Radio className="mt-0.5 size-4 text-muted" />
             <div className="min-w-0">
               <p className="text-[13px] font-medium text-ink">{live ? host?.modeLabel : "还没摆摊"}</p>
-              <p className="mt-0.5 text-[12px] text-muted">路径 · {path}</p>
+              <p className="mt-0.5 text-[12px] text-muted">路径 · {status.label}</p>
+              {showCapsuleWarnings ? (
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {status.warnings.map((warning) => (
+                    <span
+                      key={warning}
+                      className="rounded-full bg-clay px-2 py-0.5 text-[11px] text-ember-dark"
+                    >
+                      {warning}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
             </div>
           </div>
           <div className="mt-3 grid grid-cols-2 gap-2 rounded-xl bg-sidebar px-3 py-2.5">

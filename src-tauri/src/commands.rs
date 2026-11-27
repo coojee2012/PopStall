@@ -4,9 +4,13 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, State};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::p2p::{HostTarget, Node, PlazaSnapshot};
+use crate::p2p::{
+    GuestLink, HostTarget, Node, PathTrust, PlazaSnapshot, open_guest_stream,
+    read_response_head_any,
+};
 use crate::proxy::{GuestProxy, attach_stage, close_stage_view, next_stage_label, place_stage};
 use crate::server::{ServeSpec, StaticHost, Theme, scan_folder as classify_folder};
 use crate::state::{AppState, GuestSession, HostSession, StageSession};
@@ -41,9 +45,16 @@ pub async fn start_host(
     blurb: Option<String>,
     password: Option<String>,
 ) -> Result<HostInfo, String> {
-    start_host_inner(&state, mode, root, port, blurb.unwrap_or_default(), password.unwrap_or_default())
-        .await
-        .map_err(|err| err.to_string())
+    start_host_inner(
+        &state,
+        mode,
+        root,
+        port,
+        blurb.unwrap_or_default(),
+        password.unwrap_or_default(),
+    )
+    .await
+    .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -73,6 +84,46 @@ pub async fn host_status(state: State<'_, AppState>) -> Result<Option<HostInfo>,
     }))
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathTrustDto {
+    pub kind: String,
+    pub session: String,
+    pub guest: String,
+    pub host: String,
+    pub helper: Option<String>,
+}
+
+impl From<&PathTrust> for PathTrustDto {
+    fn from(trust: &PathTrust) -> Self {
+        match trust {
+            PathTrust::EndToEnd {
+                session,
+                guest,
+                host,
+            } => Self {
+                kind: "endToEnd".to_string(),
+                session: session.to_hex(),
+                guest: guest.to_string(),
+                host: host.to_string(),
+                helper: None,
+            },
+            PathTrust::HelperBridge {
+                session,
+                guest,
+                host,
+                helper,
+            } => Self {
+                kind: "helperBridge".to_string(),
+                session: session.to_hex(),
+                guest: guest.to_string(),
+                host: host.to_string(),
+                helper: Some(helper.to_string()),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteStatus {
@@ -80,6 +131,10 @@ pub struct RouteStatus {
     pub via_helper: bool,
     pub helper_offers: usize,
     pub path_label: Option<String>,
+    pub path_trust: Option<PathTrustDto>,
+    pub digest_verified: bool,
+    pub retry_count: u64,
+    pub degraded: bool,
 }
 
 #[tauri::command]
@@ -90,12 +145,32 @@ pub async fn route_status(state: State<'_, AppState>) -> Result<RouteStatus, Str
             via_helper: false,
             helper_offers: 0,
             path_label: None,
+            path_trust: None,
+            digest_verified: false,
+            retry_count: 0,
+            degraded: true,
         });
     };
+    let active_trust = state
+        .stage
+        .lock()
+        .await
+        .as_ref()
+        .and_then(|stage| stage.guest.as_ref())
+        .map(|guest| guest.link.trust.clone());
     let helper = node.helper_status().await;
     let via_helper = helper.via_helper;
+    let relay_only = node.relay_only() && !via_helper;
+    let counters = node.traffic().counters();
+    let digest_verified = counters.digest_checks > 0 && counters.digest_failures == 0;
+    let retry_count = counters.retry_total;
+    let degraded = relay_only
+        || via_helper
+        || retry_count > 0
+        || counters.digest_failures > 0
+        || counters.nonce_failures > 0;
     Ok(RouteStatus {
-        relay_only: node.relay_only() && !via_helper,
+        relay_only,
         via_helper,
         helper_offers: helper.offers,
         path_label: if via_helper {
@@ -103,6 +178,10 @@ pub async fn route_status(state: State<'_, AppState>) -> Result<RouteStatus, Str
         } else {
             node.path_summary()
         },
+        path_trust: active_trust.as_ref().map(PathTrustDto::from),
+        digest_verified,
+        retry_count,
+        degraded,
     })
 }
 
@@ -186,7 +265,11 @@ pub async fn talk_snapshot(state: State<'_, AppState>) -> Result<TalkSnapshot, S
 }
 
 #[tauri::command]
-pub async fn talk_send(state: State<'_, AppState>, text: String, name: Option<String>) -> Result<TalkSnapshot, String> {
+pub async fn talk_send(
+    state: State<'_, AppState>,
+    text: String,
+    name: Option<String>,
+) -> Result<TalkSnapshot, String> {
     let node = state.node().await.map_err(|err| err.to_string())?;
     node.talk_say(&text, name.as_deref().unwrap_or("")).await?;
     Ok(TalkSnapshot {
@@ -199,6 +282,10 @@ pub async fn talk_send(state: State<'_, AppState>, text: String, name: Option<St
 pub struct TrafficSnapshot {
     pub sent: u64,
     pub received: u64,
+    pub path_trust: Option<PathTrustDto>,
+    pub digest_verified: bool,
+    pub retry_count: u64,
+    pub degraded: bool,
 }
 
 #[tauri::command]
@@ -207,10 +294,40 @@ pub async fn traffic(state: State<'_, AppState>) -> Result<TrafficSnapshot, Stri
         return Ok(TrafficSnapshot {
             sent: 0,
             received: 0,
+            path_trust: None,
+            digest_verified: false,
+            retry_count: 0,
+            degraded: true,
         });
     };
-    let (sent, received) = node.traffic().snapshot();
-    Ok(TrafficSnapshot { sent, received })
+    let active_trust = state
+        .stage
+        .lock()
+        .await
+        .as_ref()
+        .and_then(|stage| stage.guest.as_ref())
+        .map(|guest| guest.link.trust.clone());
+    let helper = node.helper_status().await;
+    let via_helper = helper.via_helper;
+    let relay_only = node.relay_only() && !via_helper;
+    let traffic = node.traffic();
+    let (sent, received) = traffic.snapshot();
+    let counters = traffic.counters();
+    let digest_verified = counters.digest_checks > 0 && counters.digest_failures == 0;
+    let retry_count = counters.retry_total;
+    let degraded = relay_only
+        || via_helper
+        || retry_count > 0
+        || counters.digest_failures > 0
+        || counters.nonce_failures > 0;
+    Ok(TrafficSnapshot {
+        sent,
+        received,
+        path_trust: active_trust.as_ref().map(PathTrustDto::from),
+        digest_verified,
+        retry_count,
+        degraded,
+    })
 }
 
 #[tauri::command]
@@ -221,9 +338,15 @@ pub async fn open_discovered(
     title: String,
     password: Option<String>,
 ) -> Result<StageInfo, String> {
-    open_discovered_inner(&app, &state, endpoint_id, title, password.unwrap_or_default())
-        .await
-        .map_err(|err| err.to_string())
+    open_discovered_inner(
+        &app,
+        &state,
+        endpoint_id,
+        title,
+        password.unwrap_or_default(),
+    )
+    .await
+    .map_err(|err| err.to_string())
 }
 
 #[derive(Debug, Serialize)]
@@ -300,6 +423,7 @@ async fn start_host_inner(
     let password = normalize_password(&password)?;
     let node = state.node().await?;
     let site = StaticHost::open(spec).await?;
+    node.set_integrity(site.integrity_handle()).await;
     node.set_host(HostTarget {
         router: site.router.clone(),
         password: password.clone(),
@@ -448,8 +572,8 @@ async fn open_guest_inner(
     let password = normalize_password(&password)?.unwrap_or_default();
     let endpoint_id = Node::endpoint_id_of(&share_code)?;
     let node = state.node().await?;
-    let connection = node.connect(&share_code).await?;
-    open_connection_stage(app, state, connection, "对方的摊位", endpoint_id, password).await
+    let link = node.connect(&share_code).await?;
+    open_connection_stage(app, state, link, "对方的摊位", endpoint_id, password).await
 }
 
 async fn open_discovered_inner(
@@ -471,29 +595,41 @@ async fn open_discovered_inner(
     };
     let password = normalize_password(&password)?.unwrap_or_default();
     let node = state.node().await?;
-    let connection = node.connect_endpoint(&endpoint_id).await?;
-    open_connection_stage(app, state, connection, title, endpoint_id, password).await
+    let link = node.connect_endpoint(&endpoint_id).await?;
+    open_connection_stage(app, state, link, title, endpoint_id, password).await
 }
 
 async fn open_connection_stage(
     app: &AppHandle,
     state: &AppState,
-    connection: iroh::endpoint::Connection,
+    link: GuestLink,
     title: &str,
     endpoint_id: String,
     password: String,
 ) -> anyhow::Result<StageInfo> {
-    if let Err(err) = check_password(&connection, &password).await {
-        connection.close(0u8.into(), b"password");
+    if let Err(err) = check_password(&link, &password).await {
+        link.connection.close(0u8.into(), b"password");
         return Err(err);
     }
-    let traffic = state.node().await?.traffic();
-    let proxy = GuestProxy::start(connection.clone(), traffic, password.clone()).await?;
+    let traffic = match state.node().await {
+        Ok(node) => node.traffic(),
+        Err(err) => {
+            link.connection.close(0u8.into(), b"stage failed");
+            return Err(err);
+        }
+    };
+    let proxy = match GuestProxy::start(link.clone(), traffic, password.clone()).await {
+        Ok(proxy) => proxy,
+        Err(err) => {
+            link.connection.close(0u8.into(), b"stage failed");
+            return Err(err);
+        }
+    };
     let label = next_stage_label();
     let proxy_url = proxy.url();
     if let Err(err) = attach_stage(app, &label, &proxy_url, proxy.port) {
         proxy.shutdown();
-        connection.close(0u8.into(), b"stage failed");
+        link.connection.close(0u8.into(), b"stage failed");
         return Err(err);
     }
     dismiss_stage(app, state).await;
@@ -501,7 +637,7 @@ async fn open_connection_stage(
         label: label.clone(),
         guest: Some(GuestSession {
             proxy,
-            connection,
+            link,
             endpoint_id: endpoint_id.clone(),
             title: title.to_string(),
             password,
@@ -535,8 +671,8 @@ async fn use_helper_inner(
         .parse()
         .map_err(|_| anyhow::anyhow!("这个摊位的地址无效"))?;
     let node = state.node().await?;
-    let connection = node.dial_helper_to(&helper_id, target).await?;
-    open_connection_stage(app, state, connection, &title, endpoint_id, password).await
+    let link = node.dial_helper_to(&helper_id, target).await?;
+    open_connection_stage(app, state, link, &title, endpoint_id, password).await
 }
 
 fn normalize_password(raw: &str) -> anyhow::Result<Option<String>> {
@@ -553,12 +689,11 @@ fn normalize_password(raw: &str) -> anyhow::Result<Option<String>> {
     Ok(Some(trimmed.to_string()))
 }
 
-async fn check_password(connection: &iroh::endpoint::Connection, password: &str) -> anyhow::Result<()> {
+async fn check_password(link: &GuestLink, password: &str) -> anyhow::Result<()> {
     if password.is_empty() {
         return Ok(());
     }
-    let (mut send, mut recv) = connection
-        .open_bi()
+    let (mut send, mut recv) = open_guest_stream(&link.connection, &link.trust, &link.secret)
         .await
         .map_err(|err| anyhow::anyhow!("打开加密流失败: {err:?}"))?;
     let frame = crate::p2p::encode_request(&crate::p2p::RequestFrame {
@@ -570,15 +705,24 @@ async fn check_password(connection: &iroh::endpoint::Connection, password: &str)
         pass: password.to_string(),
     })?;
     send.write_all(&frame).await?;
-    send.finish()
+    send.shutdown()
+        .await
         .map_err(|err| anyhow::anyhow!("结束密码确认失败: {err:?}"))?;
-    let head = crate::p2p::read_response_head(&mut recv).await?;
-    if head.status != 401 {
+    let head = read_response_head_any(&mut recv).await?;
+    if head.status() != 401 {
         return Ok(());
     }
-    let body = recv.read_to_end(256).await.unwrap_or_default();
+    let mut body = Vec::new();
+    recv.take(256)
+        .read_to_end(&mut body)
+        .await
+        .unwrap_or_default();
     let message = String::from_utf8_lossy(&body).trim().to_string();
-    anyhow::bail!(if message.is_empty() { "密码不对".to_string() } else { message })
+    anyhow::bail!(if message.is_empty() {
+        "密码不对".to_string()
+    } else {
+        message
+    })
 }
 
 fn stall_blurb(site: &StaticHost) -> (String, String) {

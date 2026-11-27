@@ -32,13 +32,13 @@ pub fn init(data_dir: &Path) {
 }
 
 pub fn path() -> Option<PathBuf> {
-    STATE.get().and_then(|state| state.lock().ok().map(|g| g.path.clone()))
+    STATE
+        .get()
+        .and_then(|state| state.lock().ok().map(|g| g.path.clone()))
 }
 
 pub fn path_string() -> String {
-    path()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default()
+    path().map(|p| p.display().to_string()).unwrap_or_default()
 }
 
 pub fn log(message: impl AsRef<str>) {

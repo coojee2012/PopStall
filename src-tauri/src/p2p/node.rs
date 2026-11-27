@@ -7,13 +7,15 @@ use std::time::{Duration, Instant};
 use futures_util::StreamExt;
 use iroh::endpoint::{Connection, PathEvent, QuicTransportConfig, VarInt, presets};
 use iroh::protocol::Router;
-use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey, TransportAddr};
 use iroh_tickets::Ticket;
 use iroh_tickets::endpoint::EndpointTicket;
 
 use super::helper::HelperHub;
 use super::plaza::Plaza;
 use super::protocol::StallHandler;
+use super::retry::{RetryError, retry_with_backoff, with_deadline};
+use super::secure::{PathTrust, SessionId};
 use super::talk::Talk;
 use super::traffic::Traffic;
 use super::visit::VisitHub;
@@ -22,6 +24,9 @@ use crate::storage::load_or_create_secret_key;
 pub const ALPN: &[u8] = b"popstall/http/1";
 const RELAY_WAIT: Duration = Duration::from_secs(12);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
+const HELPER_DIAL_TIMEOUT: Duration = Duration::from_secs(15);
+const HELPER_UPGRADE_TIMEOUT: Duration = Duration::from_secs(20);
+const CALLBACK_TIMEOUT: Duration = Duration::from_secs(20);
 const RELAY_NOTICE_AFTER: Duration = Duration::from_secs(8);
 
 #[derive(Default)]
@@ -84,8 +89,16 @@ pub struct ShareMaterial {
     pub endpoint_id: String,
 }
 
+#[derive(Clone)]
+pub struct GuestLink {
+    pub connection: Connection,
+    pub trust: PathTrust,
+    pub secret: SecretKey,
+}
+
 pub struct Node {
     pub endpoint: Endpoint,
+    secret: SecretKey,
     /// Kept alive so the accept loop continues after `start` returns.
     #[allow(dead_code)]
     pub router: Router,
@@ -102,12 +115,12 @@ impl Node {
     pub async fn start(data_dir: &Path) -> anyhow::Result<Self> {
         let secret_key = load_or_create_secret_key(data_dir)?;
         let helper_prefs = crate::storage::helper_prefs::load(data_dir);
-        let listen_port =
-            crate::storage::helper_prefs::normalize_port(helper_prefs.listen_port);
+        let listen_port = crate::storage::helper_prefs::normalize_port(helper_prefs.listen_port);
         let traffic = Arc::new(Traffic::default());
         let routes = Arc::new(RouteBook::default());
         let handler = StallHandler::new(traffic.clone(), routes.clone());
-        let endpoint = bind_endpoint(secret_key, listen_port).await?;
+        handler.set_host_identity(secret_key.clone()).await;
+        let endpoint = bind_endpoint(secret_key.clone(), listen_port).await?;
         let mut router = Router::builder(endpoint.clone()).accept(ALPN, handler.clone());
         let (plaza, talk, helper, visit) = if cfg!(test) {
             (None, None, None, None)
@@ -159,6 +172,7 @@ impl Node {
         ));
         Ok(Self {
             endpoint,
+            secret: secret_key,
             router,
             handler,
             traffic,
@@ -219,10 +233,7 @@ impl Node {
         helper.set(enabled, limit_bps, listen_port).await
     }
 
-    pub async fn helper_offers(
-        &self,
-        exclude: Option<&str>,
-    ) -> Vec<super::helper::HelperOffer> {
+    pub async fn helper_offers(&self, exclude: Option<&str>) -> Vec<super::helper::HelperOffer> {
         let Some(helper) = &self.helper else {
             return Vec::new();
         };
@@ -234,7 +245,7 @@ impl Node {
         &self,
         helper_id: &str,
         target: EndpointId,
-    ) -> anyhow::Result<Connection> {
+    ) -> anyhow::Result<GuestLink> {
         let Some(helper) = &self.helper else {
             anyhow::bail!("互助中继还没有接上");
         };
@@ -242,9 +253,41 @@ impl Node {
             .trim()
             .parse()
             .map_err(|_| anyhow::anyhow!("帮手地址无效"))?;
-        helper
-            .dial_as_helper(helper_id, target, self.routes.clone())
-            .await
+        let result = retry_with_backoff(|attempt| {
+            let helper_id = helper_id.clone();
+            let target = target.clone();
+            async move {
+                if attempt > 1 {
+                    self.traffic.record_retry();
+                }
+                with_deadline(HELPER_DIAL_TIMEOUT, async move {
+                    helper
+                        .dial_as_helper(helper_id, target, self.routes.clone())
+                        .await
+                })
+                .await
+            }
+        })
+        .await;
+        match result {
+            Ok(connection) => Ok(GuestLink {
+                connection,
+                trust: PathTrust::HelperBridge {
+                    session: SessionId::generate(),
+                    guest: self.endpoint.id(),
+                    host: target,
+                    helper: helper_id,
+                },
+                secret: self.secret.clone(),
+            }),
+            Err(RetryError::Exhausted { attempts, source }) => Err(anyhow::anyhow!(
+                "互助中继连接失败（{attempts} 次）: {source}"
+            )),
+            Err(RetryError::Deadline { deadline }) => {
+                Err(anyhow::anyhow!("互助中继连接超时（{deadline:?}）"))
+            }
+            Err(RetryError::Operation(err)) => Err(err),
+        }
     }
 
     pub fn path_summary(&self) -> Option<String> {
@@ -275,6 +318,13 @@ impl Node {
         }
     }
 
+    pub async fn set_integrity(
+        &self,
+        integrity: Option<Arc<crate::p2p::integrity::IntegrityIndex>>,
+    ) {
+        self.handler.set_integrity(integrity).await;
+    }
+
     pub fn announce_stall(&self, title: &str, label: &str, blurb: &str, locked: bool) {
         if let Some(plaza) = &self.plaza {
             plaza.announce(title, label, blurb, locked);
@@ -302,7 +352,9 @@ impl Node {
         if !relay_ready(&self.endpoint) {
             let ready = wait_for_relay(&self.endpoint, RELAY_WAIT).await;
             if !ready {
-                tracing::warn!("relay address was not ready; the share code will be refreshed once it is");
+                tracing::warn!(
+                    "relay address was not ready; the share code will be refreshed once it is"
+                );
             }
         }
         self.share_snapshot()
@@ -321,7 +373,7 @@ impl Node {
         }
     }
 
-    pub async fn connect(&self, share_code: &str) -> anyhow::Result<iroh::endpoint::Connection> {
+    pub async fn connect(&self, share_code: &str) -> anyhow::Result<GuestLink> {
         let ticket = EndpointTicket::decode_string(share_code.trim())
             .map_err(|err| anyhow::anyhow!("分享码无法解析: {err:?}"))?;
         let addr = ticket.endpoint_addr().clone();
@@ -334,53 +386,78 @@ impl Node {
             EndpointAddr::from(target)
         };
         match self.dial(dial).await {
-            Ok(direct) => Ok(self.upgrade_path(target, direct).await),
+            Ok(direct) => {
+                let (connection, via_helper) = self.upgrade_path(target, direct).await;
+                Ok(self.guest_link(connection, target, via_helper))
+            }
             Err(err) => self
                 .try_callback_visit(target)
                 .await
+                .map(|callback| self.guest_link(callback, target, false))
                 .map_err(|cb_err| anyhow::anyhow!("{err}；回拨也失败: {cb_err}")),
         }
     }
 
-    pub async fn connect_endpoint(&self, endpoint_id: &str) -> anyhow::Result<iroh::endpoint::Connection> {
+    pub async fn connect_endpoint(&self, endpoint_id: &str) -> anyhow::Result<GuestLink> {
         let id: EndpointId = endpoint_id
             .trim()
             .parse()
             .map_err(|_| anyhow::anyhow!("这个摊位的地址无效"))?;
         self.ensure_not_self(id)?;
         match self.dial(EndpointAddr::from(id)).await {
-            Ok(direct) => Ok(self.upgrade_path(id, direct).await),
+            Ok(direct) => {
+                let (connection, via_helper) = self.upgrade_path(id, direct).await;
+                Ok(self.guest_link(connection, id, via_helper))
+            }
             Err(err) => self
                 .try_callback_visit(id)
                 .await
+                .map(|callback| self.guest_link(callback, id, false))
                 .map_err(|cb_err| anyhow::anyhow!("{err}；回拨也失败: {cb_err}")),
         }
     }
 
     /// Prefer direct, then mutual helper, then callback visit when we are dialable.
-    async fn upgrade_path(&self, target: EndpointId, direct: Connection) -> Connection {
+    async fn upgrade_path(&self, target: EndpointId, direct: Connection) -> (Connection, bool) {
         if super::helper::connection_is_direct(&direct) {
             if let Some(helper) = &self.helper {
                 helper.set_via_helper(false);
             }
-            return direct;
+            return (direct, false);
         }
-        let after_helper = if let Some(helper) = &self.helper {
-            let (connection, via) = super::helper::connect_preferring_helper(
-                &self.endpoint,
-                &helper.book(),
-                target,
-                direct,
-                self.routes.clone(),
-            )
+        let (after_helper, via_helper) = if let Some(helper) = &self.helper {
+            let started = Instant::now();
+            let upgraded = with_deadline(HELPER_UPGRADE_TIMEOUT, async {
+                Ok::<_, anyhow::Error>(
+                    super::helper::connect_preferring_helper(
+                        &self.endpoint,
+                        &helper.book(),
+                        target,
+                        direct.clone(),
+                        self.routes.clone(),
+                    )
+                    .await,
+                )
+            })
             .await;
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            self.traffic.record_helper_upgrade_ms(elapsed_ms);
+            let (connection, via) = match upgraded {
+                Ok(pair) => pair,
+                Err(err) => {
+                    crate::netdebug::log(format!(
+                        "helper_upgrade_timeout target={target} err={err}"
+                    ));
+                    (direct, false)
+                }
+            };
             helper.set_via_helper(via);
             if via || super::helper::connection_is_direct(&connection) {
-                return connection;
+                return (connection, via);
             }
-            connection
+            (connection, false)
         } else {
-            direct
+            (direct, false)
         };
         match self.try_callback_visit(target).await {
             Ok(callback) => {
@@ -388,14 +465,34 @@ impl Node {
                 if let Some(helper) = &self.helper {
                     helper.set_via_helper(false);
                 }
-                callback
+                (callback, false)
             }
             Err(err) => {
-                crate::netdebug::log(format!(
-                    "visit_callback_skip target={target} err={err}"
-                ));
-                after_helper
+                crate::netdebug::log(format!("visit_callback_skip target={target} err={err}"));
+                (after_helper, false)
             }
+        }
+    }
+
+    fn guest_link(&self, connection: Connection, host: EndpointId, via_helper: bool) -> GuestLink {
+        let trust = if via_helper {
+            PathTrust::HelperBridge {
+                session: SessionId::generate(),
+                guest: self.endpoint.id(),
+                host,
+                helper: connection.remote_id(),
+            }
+        } else {
+            PathTrust::EndToEnd {
+                session: SessionId::generate(),
+                guest: self.endpoint.id(),
+                host,
+            }
+        };
+        GuestLink {
+            connection,
+            trust,
+            secret: self.secret.clone(),
         }
     }
 
@@ -403,7 +500,10 @@ impl Node {
         let Some(visit) = &self.visit else {
             anyhow::bail!("回拨串门不可用");
         };
-        let connection = visit.connect_via_callback(host).await?;
+        let connection = with_deadline(CALLBACK_TIMEOUT, async {
+            visit.connect_via_callback(host).await
+        })
+        .await?;
         watch_paths(connection.clone(), "visit-cb", self.routes.clone());
         Ok(connection)
     }
@@ -425,15 +525,34 @@ impl Node {
         let relays = addr.relay_urls().count();
         let direct = addr.ip_addrs().count();
         tracing::info!(remote = %addr.id, relays, direct, "开始拨号");
-        match tokio::time::timeout(CONNECT_TIMEOUT, self.endpoint.connect(addr, ALPN)).await {
-            Ok(Ok(connection)) => {
+        let result = retry_with_backoff(|attempt| {
+            let addr = addr.clone();
+            async move {
+                if attempt > 1 {
+                    self.traffic.record_retry();
+                }
+                with_deadline(CONNECT_TIMEOUT, async move {
+                    self.endpoint
+                        .connect(addr, ALPN)
+                        .await
+                        .map_err(|err| anyhow::anyhow!("P2P 连接失败: {err:?}"))
+                })
+                .await
+            }
+        })
+        .await;
+        match result {
+            Ok(connection) => {
                 watch_paths(connection.clone(), "guest", self.routes.clone());
                 Ok(connection)
             }
-            Ok(Err(err)) => Err(anyhow::anyhow!("P2P 连接失败: {err:?}")),
-            Err(_) => Err(anyhow::anyhow!(
-                "P2P 连接超时。对方需要正在开张；跨网第一次握手可能要半分钟"
+            Err(RetryError::Exhausted { attempts, source }) => {
+                Err(anyhow::anyhow!("P2P 连接失败（{attempts} 次）: {source}"))
+            }
+            Err(RetryError::Deadline { deadline }) => Err(anyhow::anyhow!(
+                "P2P 连接超时（{deadline:?}）。对方需要正在开张；跨网第一次握手可能要半分钟"
             )),
+            Err(RetryError::Operation(err)) => Err(err),
         }
     }
 }
@@ -520,7 +639,9 @@ pub(crate) fn watch_paths(connection: Connection, role: &'static str, routes: Ar
     });
 }
 
-fn notice_wait(since: Option<Instant>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+fn notice_wait(
+    since: Option<Instant>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {
         match since {
             Some(since) => {

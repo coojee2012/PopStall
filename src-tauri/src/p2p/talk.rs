@@ -51,7 +51,12 @@ struct Room {
 }
 
 impl Room {
-    fn compose(&mut self, secret: &SecretKey, text: &str, name: &str) -> Result<Vec<u8>, &'static str> {
+    fn compose(
+        &mut self,
+        secret: &SecretKey,
+        text: &str,
+        name: &str,
+    ) -> Result<Vec<u8>, &'static str> {
         if let Some(previous) = self.last_sent
             && previous.elapsed() < SEND_GAP
         {
@@ -96,7 +101,8 @@ impl Room {
             if cursor + 4 > bytes.len() {
                 break;
             }
-            let len = u32::from_be_bytes(bytes[cursor..cursor + 4].try_into().unwrap_or([0; 4])) as usize;
+            let len =
+                u32::from_be_bytes(bytes[cursor..cursor + 4].try_into().unwrap_or([0; 4])) as usize;
             cursor += 4;
             if len == 0 || len > MAX_FRAME || cursor + len > bytes.len() {
                 break;
@@ -146,7 +152,9 @@ impl Room {
             return false;
         }
         let key = sort_key(&line);
-        let index = self.lines.partition_point(|existing| sort_key(existing) < key);
+        let index = self
+            .lines
+            .partition_point(|existing| sort_key(existing) < key);
         self.lines.insert(index, line);
         while self.lines.len() > MAX_LINES {
             let removed = self.lines.remove(0);
@@ -225,7 +233,10 @@ fn decode(bytes: &[u8]) -> Option<Line> {
     }
     let text = std::str::from_utf8(&cursor[..text_len]).ok()?.to_string();
     cursor = &cursor[text_len..];
-    if text.chars().any(|ch| ch.is_control()) || text.chars().count() > MAX_CHARS || text.trim().is_empty() {
+    if text.chars().any(|ch| ch.is_control())
+        || text.chars().count() > MAX_CHARS
+        || text.trim().is_empty()
+    {
         return None;
     }
     let name = if version >= 2 {
@@ -234,7 +245,10 @@ fn decode(bytes: &[u8]) -> Option<Line> {
             return None;
         }
         let name = std::str::from_utf8(cursor).ok()?.to_string();
-        if name.chars().any(|ch| ch.is_control()) || name.chars().count() > MAX_NAME_CHARS || name != name.trim() {
+        if name.chars().any(|ch| ch.is_control())
+            || name.chars().count() > MAX_NAME_CHARS
+            || name != name.trim()
+        {
             return None;
         }
         name
@@ -281,7 +295,9 @@ pub struct TalkHandler {
 
 impl std::fmt::Debug for TalkHandler {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("TalkHandler").finish_non_exhaustive()
+        formatter
+            .debug_struct("TalkHandler")
+            .finish_non_exhaustive()
     }
 }
 
@@ -344,7 +360,8 @@ impl Talk {
     pub async fn say(&self, text: &str, name: &str) -> Result<(), String> {
         let raw = {
             let mut room = self.room.lock().await;
-            room.compose(&self.secret, text, name).map_err(str::to_string)?
+            room.compose(&self.secret, text, name)
+                .map_err(str::to_string)?
         };
         let _ = self.tx.try_send(TalkCmd::Send(raw));
         Ok(())
@@ -363,7 +380,13 @@ pub fn start(endpoint: Endpoint, gossip: Gossip, plaza: Plaza) -> Talk {
     }));
     let handler = TalkHandler { room: room.clone() };
     tokio::spawn(serve(gossip, rx, room.clone()));
-    tokio::spawn(sync_loop(endpoint, plaza, room.clone(), tx.clone(), secret.public()));
+    tokio::spawn(sync_loop(
+        endpoint,
+        plaza,
+        room.clone(),
+        tx.clone(),
+        secret.public(),
+    ));
     Talk {
         room,
         tx,
@@ -381,7 +404,11 @@ async fn serve(gossip: Gossip, mut rx: mpsc::Receiver<TalkCmd>, room: Arc<Mutex<
     }
 }
 
-async fn session(gossip: &Gossip, rx: &mut mpsc::Receiver<TalkCmd>, room: &Mutex<Room>) -> Result<(), ()> {
+async fn session(
+    gossip: &Gossip,
+    rx: &mut mpsc::Receiver<TalkCmd>,
+    room: &Mutex<Room>,
+) -> Result<(), ()> {
     let options = JoinOptions::with_bootstrap(std::iter::empty()).with_subscription_capacity(256);
     let topic = gossip
         .subscribe_with_opts(TOPIC, options)
@@ -457,10 +484,13 @@ async fn sync_loop(
 }
 
 async fn fetch_buffer(endpoint: &Endpoint, id: EndpointId) -> anyhow::Result<Vec<u8>> {
-    let connection = tokio::time::timeout(Duration::from_secs(8), endpoint.connect(EndpointAddr::from(id), ALPN))
-        .await
-        .map_err(|_| anyhow::anyhow!("sync timed out"))?
-        .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+    let connection = tokio::time::timeout(
+        Duration::from_secs(8),
+        endpoint.connect(EndpointAddr::from(id), ALPN),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("sync timed out"))?
+    .map_err(|err| anyhow::anyhow!("{err:?}"))?;
     let (mut send, mut recv) = connection
         .open_bi()
         .await
@@ -533,7 +563,10 @@ mod tests {
         kept.compose(&alice, "还在", "阿宁").unwrap();
         assert_eq!(kept.lines[0].name, "阿宁");
         kept.last_sent = None;
-        assert!(kept.compose(&alice, "太长", "一二三四五六七八九十一二三四").is_err());
+        assert!(
+            kept.compose(&alice, "太长", "一二三四五六七八九十一二三四")
+                .is_err()
+        );
         let blob = kept.export_blob();
 
         let mut arrived = Room {

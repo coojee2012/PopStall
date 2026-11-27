@@ -58,7 +58,10 @@ impl Theme {
     pub fn matches(self, ext: &str) -> bool {
         let ext = ext.to_ascii_lowercase();
         match self {
-            Self::Image => matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "bmp"),
+            Self::Image => matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "bmp"
+            ),
             Self::Music => matches!(ext.as_str(), "mp3" | "flac" | "m4a" | "ogg" | "wav" | "aac"),
             Self::Video => matches!(ext.as_str(), "mp4" | "webm" | "mov" | "m4v" | "mkv"),
             Self::Novel => matches!(ext.as_str(), "md" | "markdown" | "txt"),
@@ -158,9 +161,7 @@ pub fn scan_folder(root: &Path) -> anyhow::Result<Shelf> {
 pub fn files_for_theme(files: &[MediaFile], theme: Theme) -> Vec<MediaFile> {
     files
         .iter()
-        .filter(|file| {
-            extension_of(&file.relative).is_some_and(|ext| theme.matches(&ext))
-        })
+        .filter(|file| extension_of(&file.relative).is_some_and(|ext| theme.matches(&ext)))
         .cloned()
         .collect()
 }
@@ -249,9 +250,15 @@ fn walk(
 
 fn theme_of(relative: &Path) -> Option<Theme> {
     let ext = extension_of(relative)?;
-    [Theme::Image, Theme::Music, Theme::Video, Theme::Novel, Theme::Document]
-        .into_iter()
-        .find(|theme| theme.matches(&ext))
+    [
+        Theme::Image,
+        Theme::Music,
+        Theme::Video,
+        Theme::Novel,
+        Theme::Document,
+    ]
+    .into_iter()
+    .find(|theme| theme.matches(&ext))
 }
 
 fn extension_of(path: &Path) -> Option<String> {
@@ -298,12 +305,12 @@ mod tests {
         assert_eq!(shelf.report.counts.document, 1);
         assert_eq!(shelf.report.counts.other, 2);
         assert_eq!(files_for_theme(&shelf.files, Theme::Image).len(), 1);
-        assert!(
-            shelf
-                .files
-                .iter()
-                .all(|file| !file.relative.components().any(|part| part.as_os_str() == "node_modules"))
-        );
+        assert!(shelf.files.iter().all(|file| {
+            !file
+                .relative
+                .components()
+                .any(|part| part.as_os_str() == "node_modules")
+        }));
 
         let _ = std::fs::remove_dir_all(&root);
     }

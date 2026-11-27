@@ -45,11 +45,7 @@ pub async fn save_from_stage(
     let Some(dest) = dest else {
         return Ok(());
     };
-    let url = format!(
-        "{}{}",
-        origin.trim_end_matches('/'),
-        media_path
-    );
+    let url = format!("{}{}", origin.trim_end_matches('/'), media_path);
     download_to_file(&url, &dest).await?;
     tracing::info!(path = %dest.display(), "saved stall file");
     Ok(())
@@ -144,8 +140,9 @@ mod tests {
 
     #[test]
     fn parses_save_as() {
-        let url = Url::parse("http://127.0.0.1:4321/_stall/save-as?path=%2Fmedia%2Fa.jpg&name=a.jpg")
-            .unwrap();
+        let url =
+            Url::parse("http://127.0.0.1:4321/_stall/save-as?path=%2Fmedia%2Fa.jpg&name=a.jpg")
+                .unwrap();
         let (path, name) = save_as_request(&url, 4321).unwrap();
         assert_eq!(path, "/media/a.jpg");
         assert_eq!(name, "a.jpg");
@@ -154,8 +151,10 @@ mod tests {
 
     #[test]
     fn rejects_traversal() {
-        let url = Url::parse("http://127.0.0.1:4321/_stall/save-as?path=%2Fmedia%2F..%2Fetc%2Fpasswd&name=x")
-            .unwrap();
+        let url = Url::parse(
+            "http://127.0.0.1:4321/_stall/save-as?path=%2Fmedia%2F..%2Fetc%2Fpasswd&name=x",
+        )
+        .unwrap();
         assert!(save_as_request(&url, 4321).is_none());
     }
 }

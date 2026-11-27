@@ -26,7 +26,13 @@ pub enum Card {
     },
 }
 
-pub fn encode_open(secret: &SecretKey, title: &str, label: &str, blurb: &str, locked: bool) -> Vec<u8> {
+pub fn encode_open(
+    secret: &SecretKey,
+    title: &str,
+    label: &str,
+    blurb: &str,
+    locked: bool,
+) -> Vec<u8> {
     encode(
         secret,
         KIND_OPEN,
@@ -65,7 +71,11 @@ pub fn decode(bytes: &[u8], now: u64) -> Option<Card> {
     } else {
         String::new()
     };
-    let locked = if version >= 3 { take_u8(&mut cursor)? == 1 } else { false };
+    let locked = if version >= 3 {
+        take_u8(&mut cursor)? == 1
+    } else {
+        false
+    };
     if !cursor.is_empty() {
         return None;
     }
@@ -117,7 +127,15 @@ pub fn clip(text: &str, max: usize) -> String {
     trimmed[..end].to_string()
 }
 
-fn encode(secret: &SecretKey, kind: u8, title: &str, label: &str, blurb: &str, ttl: u32, locked: bool) -> Vec<u8> {
+fn encode(
+    secret: &SecretKey,
+    kind: u8,
+    title: &str,
+    label: &str,
+    blurb: &str,
+    ttl: u32,
+    locked: bool,
+) -> Vec<u8> {
     let mut body = Vec::with_capacity(256);
     body.extend_from_slice(MAGIC);
     body.push(if locked { 3 } else { VERSION });

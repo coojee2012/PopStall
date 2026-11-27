@@ -457,9 +457,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use iroh::endpoint::{presets, RelayMode};
-    use iroh::protocol::Router;
     use iroh::SecretKey;
+    use iroh::endpoint::{RelayMode, presets};
+    use iroh::protocol::Router;
 
     use crate::p2p::node::RouteBook;
     use crate::p2p::protocol::{HostTarget, StallHandler};
@@ -510,12 +510,7 @@ mod tests {
             .port();
         let book = WaitBook::default();
         let guest_router = Router::builder(guest_ep.clone())
-            .accept(
-                CB_ALPN,
-                CallbackHandler {
-                    book: book.clone(),
-                },
-            )
+            .accept(CB_ALPN, CallbackHandler { book: book.clone() })
             .spawn();
         let host_router = Router::builder(host_ep.clone())
             .accept(

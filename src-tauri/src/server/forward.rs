@@ -39,7 +39,9 @@ pub async fn proxy(port: u16, mut request: Request) -> Response {
         .get(header::UPGRADE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
-    let client_upgrade = upgrade.then(|| request.extensions_mut().remove::<OnUpgrade>()).flatten();
+    let client_upgrade = upgrade
+        .then(|| request.extensions_mut().remove::<OnUpgrade>())
+        .flatten();
 
     let Ok(stream) = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await else {
         return (
@@ -54,14 +56,20 @@ pub async fn proxy(port: u16, mut request: Request) -> Response {
     };
 
     let io = TokioIo::new(stream);
-    let (mut sender, connection) =
-        match hyper::client::conn::http1::Builder::new().handshake::<_, Body>(io).await {
-            Ok(pair) => pair,
-            Err(err) => {
-                tracing::warn!(%err, "local app handshake failed");
-                return (StatusCode::BAD_GATEWAY, "连上了端口，但没有完成 HTTP 握手。").into_response();
-            }
-        };
+    let (mut sender, connection) = match hyper::client::conn::http1::Builder::new()
+        .handshake::<_, Body>(io)
+        .await
+    {
+        Ok(pair) => pair,
+        Err(err) => {
+            tracing::warn!(%err, "local app handshake failed");
+            return (
+                StatusCode::BAD_GATEWAY,
+                "连上了端口，但没有完成 HTTP 握手。",
+            )
+                .into_response();
+        }
+    };
     tokio::spawn(async move {
         if let Err(err) = connection.await {
             tracing::debug!(%err, "local app connection closed");
@@ -116,7 +124,10 @@ pub async fn proxy(port: u16, mut request: Request) -> Response {
     let (parts, incoming) = response.into_parts();
     let mut out = Response::builder().status(parts.status);
     for (name, value) in parts.headers.iter() {
-        if HOP.iter().any(|hop| name.as_str().eq_ignore_ascii_case(hop)) {
+        if HOP
+            .iter()
+            .any(|hop| name.as_str().eq_ignore_ascii_case(hop))
+        {
             continue;
         }
         out = out.header(name, value);

@@ -79,7 +79,14 @@ pub fn attach_stage(app: &AppHandle, label: &str, target: &str, port: u16) -> an
 /// Floor so a bad first layout cannot park the child webview over Stage chrome.
 const STAGE_CHROME_FLOOR: f64 = 56.0;
 
-pub fn place_stage(app: &AppHandle, label: &str, x: f64, y: f64, width: f64, height: f64) -> anyhow::Result<()> {
+pub fn place_stage(
+    app: &AppHandle,
+    label: &str,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> anyhow::Result<()> {
     let Some(webview) = app.get_webview(label) else {
         return Ok(());
     };

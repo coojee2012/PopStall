@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -9,10 +9,11 @@ use iroh::{Endpoint, EndpointId, SecretKey};
 use iroh_gossip::{Event, Gossip, GossipSender, JoinOptions, TopicId};
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use serde::Serialize;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 
 use super::board::{self, BOOTSTRAP_LIMIT};
 use super::card::{self, Card};
+use crate::storage::helper_prefs;
 
 const TOPIC: TopicId = TopicId::from_bytes([
     0xd9, 0x00, 0x3d, 0x5f, 0xc0, 0x88, 0xb0, 0x33, 0x24, 0xaf, 0xd9, 0xa9, 0x67, 0x27, 0xe6, 0xd1,
@@ -57,6 +58,8 @@ pub struct PlazaStall {
 pub struct PlazaSnapshot {
     pub stalls: Vec<PlazaStall>,
     pub neighbors: usize,
+    pub degraded: bool,
+    pub relay_used: Option<String>,
 }
 
 impl Default for PlazaSnapshot {
@@ -64,6 +67,8 @@ impl Default for PlazaSnapshot {
         Self {
             stalls: Vec::new(),
             neighbors: 0,
+            degraded: false,
+            relay_used: None,
         }
     }
 }
@@ -73,6 +78,8 @@ pub struct Plaza {
     announce: watch::Sender<Announce>,
     stalls: Arc<Mutex<HashMap<EndpointId, LiveStall>>>,
     neighbors: Arc<AtomicUsize>,
+    degraded: Arc<AtomicBool>,
+    relay_used: Arc<Mutex<Option<String>>>,
 }
 
 impl Plaza {
@@ -110,10 +117,16 @@ impl Plaza {
                 locked: stall.locked,
             })
             .collect();
-        listed.sort_by(|left, right| left.title.cmp(&right.title).then(left.endpoint_id.cmp(&right.endpoint_id)));
+        listed.sort_by(|left, right| {
+            left.title
+                .cmp(&right.title)
+                .then(left.endpoint_id.cmp(&right.endpoint_id))
+        });
         PlazaSnapshot {
             stalls: listed,
             neighbors: self.neighbors.load(Ordering::Relaxed),
+            degraded: self.degraded.load(Ordering::Relaxed),
+            relay_used: self.relay_used.lock().await.clone(),
         }
     }
 }
@@ -140,6 +153,8 @@ pub fn start(endpoint: Endpoint, gossip: Gossip, mdns: Option<MdnsAddressLookup>
     let (announce, announce_rx) = watch::channel(Announce::Idle);
     let stalls = Arc::new(Mutex::new(HashMap::new()));
     let neighbors = Arc::new(AtomicUsize::new(0));
+    let degraded = Arc::new(AtomicBool::new(false));
+    let relay_used = Arc::new(Mutex::new(None));
     let local_peers = Arc::new(Mutex::new(Vec::new()));
     let heard = Arc::new(Mutex::new(Vec::new()));
     if let Some(mdns) = mdns {
@@ -164,10 +179,24 @@ pub fn start(endpoint: Endpoint, gossip: Gossip, mdns: Option<MdnsAddressLookup>
         announce,
         stalls: stalls.clone(),
         neighbors: neighbors.clone(),
+        degraded: degraded.clone(),
+        relay_used: relay_used.clone(),
     };
     let secret = endpoint.secret_key().clone();
     tokio::spawn(async move {
-        plaza_loop(endpoint, gossip, secret, announce_rx, stalls, neighbors, local_peers, heard).await;
+        plaza_loop(
+            endpoint,
+            gossip,
+            secret,
+            announce_rx,
+            stalls,
+            neighbors,
+            degraded,
+            relay_used,
+            local_peers,
+            heard,
+        )
+        .await;
     });
     plaza
 }
@@ -179,11 +208,16 @@ async fn plaza_loop(
     mut announce: watch::Receiver<Announce>,
     stalls: Arc<Mutex<HashMap<EndpointId, LiveStall>>>,
     neighbors: Arc<AtomicUsize>,
+    degraded: Arc<AtomicBool>,
+    relay_used: Arc<Mutex<Option<String>>>,
     local_peers: Arc<Mutex<Vec<EndpointId>>>,
     heard: Arc<Mutex<Vec<EndpointId>>>,
 ) {
     let _ = wait_for_relay(&endpoint, Duration::from_secs(15)).await;
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(6)).build() {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .build()
+    {
         Ok(client) => client,
         Err(err) => {
             tracing::warn!(?err, "plaza client failed");
@@ -198,6 +232,8 @@ async fn plaza_loop(
             &mut announce,
             &stalls,
             &neighbors,
+            &degraded,
+            &relay_used,
             &local_peers,
             &heard,
         )
@@ -216,6 +252,8 @@ async fn run_session(
     announce: &mut watch::Receiver<Announce>,
     stalls: &Mutex<HashMap<EndpointId, LiveStall>>,
     neighbors: &AtomicUsize,
+    degraded: &AtomicBool,
+    relay_used: &Mutex<Option<String>>,
     local_peers: &Mutex<Vec<EndpointId>>,
     heard: &Mutex<Vec<EndpointId>>,
 ) -> anyhow::Result<()> {
@@ -228,64 +266,98 @@ async fn run_session(
     neighbors.store(0, Ordering::Relaxed);
     let self_id = secret.public();
     let mut published = false;
-    publish_current(&mut sender, secret, current_announce(announce), &mut published).await;
+    publish_current(
+        &mut sender,
+        secret,
+        current_announce(announce),
+        &mut published,
+    )
+    .await;
 
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await;
-    refresh_links(&mut sender, client, self_id, local_peers, heard).await;
+    refresh_links(
+        &mut sender,
+        client,
+        secret,
+        self_id,
+        degraded,
+        relay_used,
+        local_peers,
+        heard,
+    )
+    .await;
 
     loop {
         tokio::select! {
-            event = receiver.next() => {
-                let Some(event) = event else {
-                    return Ok(());
-                };
-                match event {
-                    Ok(Event::Received(message)) => {
-                        if let Some(id) = ingest(stalls, self_id, &message.content).await {
-                            remember(heard, self_id, id).await;
+                event = receiver.next() => {
+                    let Some(event) = event else {
+                        return Ok(());
+                    };
+                    match event {
+                        Ok(Event::Received(message)) => {
+                            if let Some(id) = ingest(stalls, self_id, &message.content).await {
+                                remember(heard, self_id, id).await;
+                            }
                         }
+                        Ok(Event::NeighborUp(_)) => {
+                            neighbors.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(Event::NeighborDown(_)) => {
+                            let _ = neighbors.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                                Some(value.saturating_sub(1))
+                            });
+                        }
+                        Ok(Event::Lagged) => tracing::debug!("plaza missed a burst of messages"),
+                        Ok(_) => {}
+                        Err(err) => tracing::debug!(?err, "plaza event failed"),
                     }
-                    Ok(Event::NeighborUp(_)) => {
-                        neighbors.fetch_add(1, Ordering::Relaxed);
+                }
+                changed = announce.changed() => {
+                    if changed.is_err() {
+                        return Ok(());
                     }
-                    Ok(Event::NeighborDown(_)) => {
-                        let _ = neighbors.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                            Some(value.saturating_sub(1))
-                        });
-                    }
-                    Ok(Event::Lagged) => tracing::debug!("plaza missed a burst of messages"),
-                    Ok(_) => {}
-                    Err(err) => tracing::debug!(?err, "plaza event failed"),
+                    publish_current(&mut sender, secret, current_announce(announce), &mut published).await;
+                }
+                _ = ticker.tick() => {
+                    expire(stalls).await;
+                    refresh_links(
+            &mut sender,
+            client,
+            secret,
+            self_id,
+            degraded,
+            relay_used,
+            local_peers,
+            heard,
+        )
+        .await;
+                    publish_current(&mut sender, secret, current_announce(announce), &mut published).await;
                 }
             }
-            changed = announce.changed() => {
-                if changed.is_err() {
-                    return Ok(());
-                }
-                publish_current(&mut sender, secret, current_announce(announce), &mut published).await;
-            }
-            _ = ticker.tick() => {
-                expire(stalls).await;
-                refresh_links(&mut sender, client, self_id, local_peers, heard).await;
-                publish_current(&mut sender, secret, current_announce(announce), &mut published).await;
-            }
-        }
     }
 }
 
 async fn refresh_links(
     sender: &mut GossipSender,
     client: &reqwest::Client,
+    secret: &SecretKey,
     self_id: EndpointId,
+    degraded: &AtomicBool,
+    relay_used: &Mutex<Option<String>>,
     local_peers: &Mutex<Vec<EndpointId>>,
     heard: &Mutex<Vec<EndpointId>>,
 ) {
-    let fetched = board::fetch_bootstrap(client).await;
-    let merged = board::merge_bootstrap(self_id, &fetched, BOOTSTRAP_LIMIT);
-    if !board::same_members(&fetched, &merged) {
-        board::publish_bootstrap(client, &merged).await;
+    let fetched = board::fetch_bootstrap(client, secret).await;
+    *relay_used.lock().await = fetched.relay_used.clone();
+    degraded.store(fetched.degraded, Ordering::Relaxed);
+    let merged = board::merge_bootstrap(self_id, &fetched.ids, BOOTSTRAP_LIMIT);
+    helper_prefs::remember_bootstrap_peers(&merged);
+    if !board::same_members(&fetched.ids, &merged)
+        && !board::publish_bootstrap(client, secret, &merged, fetched.observed).await
+    {
+        degraded.store(true, Ordering::Relaxed);
     }
     let mut dial = Vec::new();
     push_unique(&mut dial, &merged, self_id, 8);
@@ -433,5 +505,50 @@ async fn wait_for_relay(endpoint: &Endpoint, timeout: Duration) -> bool {
             return false;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_plaza(degraded: bool, relay: Option<&str>) -> Plaza {
+        Plaza {
+            announce: watch::channel(Announce::Idle).0,
+            stalls: Arc::new(Mutex::new(HashMap::new())),
+            neighbors: Arc::new(AtomicUsize::new(0)),
+            degraded: Arc::new(AtomicBool::new(degraded)),
+            relay_used: Arc::new(Mutex::new(relay.map(str::to_string))),
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_default_has_no_degradation() {
+        let snapshot = PlazaSnapshot::default();
+        assert!(!snapshot.degraded);
+        assert_eq!(snapshot.relay_used, None);
+        assert!(snapshot.stalls.is_empty());
+        assert_eq!(snapshot.neighbors, 0);
+    }
+
+    #[tokio::test]
+    async fn snapshot_exposes_relay_and_degraded_state() {
+        let plaza = test_plaza(true, Some("https://dns.iroh.link/pkarr"));
+        let snapshot = plaza.snapshot(iroh::SecretKey::generate().public()).await;
+        assert!(snapshot.degraded);
+        assert_eq!(
+            snapshot.relay_used.as_deref(),
+            Some("https://dns.iroh.link/pkarr")
+        );
+    }
+
+    #[test]
+    fn push_unique_skips_self_and_duplicates() {
+        let self_id = iroh::SecretKey::generate().public();
+        let other = iroh::SecretKey::generate().public();
+        let third = iroh::SecretKey::generate().public();
+        let mut dial = Vec::new();
+        push_unique(&mut dial, &[self_id, other, other, third], self_id, 8);
+        assert_eq!(dial, vec![other, third]);
     }
 }

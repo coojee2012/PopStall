@@ -42,9 +42,15 @@ export type PlazaSnapshot = {
   neighbors: number;
 };
 
+export type PathTrustValue = string | { kind?: string | null } | null;
+
 export type TrafficSnapshot = {
   sent: number;
   received: number;
+  pathTrust?: PathTrustValue;
+  digestVerified?: boolean | null;
+  retryCount?: number | null;
+  degraded?: boolean | null;
 };
 
 export type RouteStatus = {
@@ -52,6 +58,10 @@ export type RouteStatus = {
   viaHelper: boolean;
   helperOffers: number;
   pathLabel?: string | null;
+  pathTrust?: PathTrustValue;
+  digestVerified?: boolean | null;
+  retryCount?: number | null;
+  degraded?: boolean | null;
 };
 
 export type HelperOffer = {
@@ -60,6 +70,7 @@ export type HelperOffer = {
   load: number;
   rttMs?: number | null;
   direct: boolean;
+  relay: boolean;
   usable: boolean;
   note: string;
 };
@@ -76,6 +87,10 @@ export type HelperStatus = {
   listenPort?: number | null;
   boundPorts?: number[];
   portNote?: string;
+  pathTrust?: PathTrustValue;
+  digestVerified?: boolean | null;
+  retryCount?: number | null;
+  degraded?: boolean | null;
 };
 
 export type TalkLine = {

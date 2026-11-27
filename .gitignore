@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# for AI
+.agents/
+.codebuddy/
+.omo/
+.playwright-mcp/
+.trae/

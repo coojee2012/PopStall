@@ -1,3 +1,4 @@
+import { routeStatusNote } from "../../lib/utils";
 import { useRouteStore, refreshHelpers, switchHelper } from "../../stores/route";
 import { useSession } from "../../stores/session";
 import { Button } from "../ui/button";
@@ -18,9 +19,22 @@ export function RouteBanner() {
   const probing = useRouteStore((state) => state.probing);
   const switching = useRouteStore((state) => state.switching);
   const probeError = useRouteStore((state) => state.probeError);
+  const pathTrust = useRouteStore((state) => state.pathTrust);
+  const digestVerified = useRouteStore((state) => state.digestVerified);
+  const retryCount = useRouteStore((state) => state.retryCount);
+  const degraded = useRouteStore((state) => state.degraded);
   const stage = useSession((state) => state.stage);
   const guestId = stage?.kind === "guest" ? stage.endpointId ?? undefined : undefined;
   const showHelpers = (relayOnly || viaHelper) && (helperOffers > 0 || helpers.length > 0);
+  const status = routeStatusNote({
+    pathTrust,
+    pathLabel,
+    viaHelper,
+    relayOnly,
+    digestVerified,
+    retryCount,
+    degraded,
+  });
 
   if (!relayOnly && !viaHelper) {
     return null;
@@ -34,20 +48,26 @@ export function RouteBanner() {
     >
       {viaHelper ? (
         <>
-          <p className="font-medium">这一趟走了互助中继</p>
-          <p className="opacity-90">{pathLabel ?? "直连帮手在转发"}。列表里不含 n0 公共中继。</p>
+          <p className="font-medium">{status.label}</p>
+          <p className="opacity-90">
+            {pathLabel ?? "直连帮手在转发"}。正文在访客和摊主之间端到端加密，帮手只看得到必要的路由元数据。
+            列表里不含 n0 公共中继。
+          </p>
         </>
       ) : (
         <>
-          <p className="font-medium">直连没有打通，现在走中继</p>
+          <p className="font-medium">直连没有打通，现在走{status.label}</p>
           <p className="opacity-90">
-            当前路径：{pathLabel ?? "公共中继"}。公共中继常被限速，影音可能偏慢。
+            当前路径：{pathLabel ?? status.label}。公共中继常被限速，影音可能偏慢。
             {helperOffers > 0
               ? " 下方是可用的互助帮手。"
               : " 有第三方打开「我来当中继」时会出现在这里。"}
           </p>
         </>
       )}
+      {status.warnings.length > 0 ? (
+        <p className="mt-1 text-xs text-ember-dark">{status.warnings.join(" · ")}</p>
+      ) : null}
 
       {showHelpers ? (
         <div className="mt-3 space-y-2">

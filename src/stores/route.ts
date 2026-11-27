@@ -1,7 +1,7 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import { helperList, routeStatus, useHelper } from "../lib/api";
-import type { HelperOffer } from "../types/ipc";
+import type { HelperOffer, PathTrustValue } from "../types/ipc";
 import { useSession } from "./session";
 
 type RouteState = {
@@ -13,6 +13,10 @@ type RouteState = {
   probing: boolean;
   switching: boolean;
   probeError: string | null;
+  pathTrust: PathTrustValue;
+  digestVerified: boolean;
+  retryCount: number;
+  degraded: boolean;
 };
 
 export const useRouteStore = create<RouteState>(() => ({
@@ -24,6 +28,10 @@ export const useRouteStore = create<RouteState>(() => ({
   probing: false,
   switching: false,
   probeError: null,
+  pathTrust: null,
+  digestVerified: false,
+  retryCount: 0,
+  degraded: true,
 }));
 
 const AUTO_INTERVAL_MS = 45_000;
@@ -45,6 +53,10 @@ export function startRoute(): () => void {
       probing: false,
       switching: false,
       probeError: null,
+      pathTrust: null,
+      digestVerified: false,
+      retryCount: 0,
+      degraded: true,
     });
     return () => {
       if (token === generation) {
@@ -63,6 +75,10 @@ export function startRoute(): () => void {
         viaHelper: status.viaHelper,
         helperOffers: status.helperOffers,
         pathLabel: status.pathLabel ?? null,
+        pathTrust: status.pathTrust ?? null,
+        digestVerified: status.digestVerified ?? false,
+        retryCount: status.retryCount ?? 0,
+        degraded: status.degraded ?? true,
       });
       const stage = useSession.getState().stage;
       const guestId = stage?.kind === "guest" ? stage.endpointId : null;
@@ -86,6 +102,10 @@ export function startRoute(): () => void {
           viaHelper: false,
           helperOffers: 0,
           pathLabel: null,
+          pathTrust: null,
+          digestVerified: false,
+          retryCount: 0,
+          degraded: true,
         });
       }
     }
@@ -133,7 +153,15 @@ export async function switchHelper(helperId: string) {
   try {
     const stage = await useHelper(helperId);
     useSession.setState({ stage, lastSeenId: stage.endpointId ?? null, error: null });
-    useRouteStore.setState({ switching: false, viaHelper: true, relayOnly: false });
+    useRouteStore.setState({
+      switching: false,
+      viaHelper: true,
+      relayOnly: false,
+      pathTrust: null,
+      digestVerified: false,
+      retryCount: 0,
+      degraded: true,
+    });
   } catch (error) {
     useRouteStore.setState({
       switching: false,

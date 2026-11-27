@@ -18,8 +18,10 @@ use tower_http::trace::TraceLayer;
 use super::catalog::{MediaFile, Theme, files_for_theme, scan_folder};
 use super::exhibit::render_exhibit;
 use super::forward;
+use crate::p2p::integrity::{IntegrityDigest, IntegrityIndex, MerkleProof, MerkleTree};
 use crate::security::{
-    MAX_MEDIA_BYTES, MAX_RESPONSE_BYTES, ResolvedPath, SafePathError, resolve_within_root, validate_target,
+    MAX_MEDIA_BYTES, MAX_RESPONSE_BYTES, ResolvedPath, SafePathError, resolve_within_root,
+    validate_target,
 };
 
 const PATH_SEGMENT: &AsciiSet = &CONTROLS
@@ -43,14 +45,18 @@ pub enum ServeSpec {
 
 #[derive(Clone)]
 enum Engine {
-    Site { root: Arc<PathBuf> },
+    Site {
+        root: Arc<PathBuf>,
+    },
     Exhibition {
         root: Arc<PathBuf>,
         theme: Theme,
         title: Arc<String>,
         catalog: Arc<String>,
     },
-    App { port: u16 },
+    App {
+        port: u16,
+    },
 }
 
 pub struct StaticHost {
@@ -59,6 +65,7 @@ pub struct StaticHost {
     pub local_addr: SocketAddr,
     pub router: Router,
     shutdown: watch::Sender<bool>,
+    integrity: Option<Arc<IntegrityIndex>>,
 }
 
 impl StaticHost {
@@ -67,20 +74,21 @@ impl StaticHost {
     }
 
     pub async fn open(spec: ServeSpec) -> anyhow::Result<Self> {
-        let (engine, root_label, mode_label) = match spec {
+        let (engine, root_label, mode_label, integrity) = match spec {
             ServeSpec::Site { root } => {
-                let root = canonical_dir(root)?;
+                let root = Arc::new(canonical_dir(root)?);
+                let integrity = Arc::new(IntegrityIndex::new(root.as_ref().clone()));
                 let label = root.display().to_string();
                 (
-                    Engine::Site {
-                        root: Arc::new(root),
-                    },
+                    Engine::Site { root },
                     label,
                     "原样网站".to_string(),
+                    Some(integrity),
                 )
             }
             ServeSpec::Exhibition { root, theme } => {
-                let root = canonical_dir(root)?;
+                let root = Arc::new(canonical_dir(root)?);
+                let integrity = Arc::new(IntegrityIndex::new(root.as_ref().clone()));
                 let shelf = scan_folder(&root)?;
                 let items = files_for_theme(&shelf.files, theme);
                 let title = shelf.report.folder_name.clone();
@@ -93,13 +101,14 @@ impl StaticHost {
                 let label = root.display().to_string();
                 (
                     Engine::Exhibition {
-                        root: Arc::new(root),
+                        root,
                         theme,
                         title: Arc::new(title),
                         catalog: Arc::new(catalog),
                     },
                     label,
                     format!("{}展厅", theme.label()),
+                    Some(integrity),
                 )
             }
             ServeSpec::App { port } => {
@@ -110,6 +119,7 @@ impl StaticHost {
                     Engine::App { port },
                     format!("127.0.0.1:{port}"),
                     format!("本地应用 :{port}"),
+                    None,
                 )
             }
         };
@@ -139,7 +149,38 @@ impl StaticHost {
             local_addr,
             router,
             shutdown,
+            integrity,
         })
+    }
+
+    pub fn integrity_handle(&self) -> Option<Arc<IntegrityIndex>> {
+        self.integrity.clone()
+    }
+
+    /// Digest lookup/compute for a request target. `Engine::App` has no file
+    /// root, so it returns `None` instead of inventing a digest.
+    pub async fn digest_for(&self, target: &str) -> Option<IntegrityDigest> {
+        let index = self.integrity.as_ref()?;
+        index.digest(target).await.ok()
+    }
+
+    /// Merkle tree lookup for a request target. `Engine::App` has no file root,
+    /// so it returns `None` instead of inventing a tree.
+    pub async fn merkle_tree_for(&self, target: &str) -> Option<Arc<MerkleTree>> {
+        let index = self.integrity.as_ref()?;
+        index.merkle_tree(target).await.ok()
+    }
+
+    /// Bounded Merkle proof lookup for a request target. `Engine::App` has no
+    /// file root, so it returns `None` instead of inventing a proof.
+    pub async fn merkle_proof_for(
+        &self,
+        target: &str,
+        start: u64,
+        end: u64,
+    ) -> Option<MerkleProof> {
+        let index = self.integrity.as_ref()?;
+        index.merkle_proof(target, start, end).await.ok()
     }
 
     pub fn local_url(&self) -> String {
@@ -283,15 +324,15 @@ async fn serve_thumb(method: &Method, root: &Path, theme: Theme, rest: &str) -> 
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let path = resolved;
-    let bytes = match tokio::task::spawn_blocking(move || crate::server::cached_jpeg_thumb(&path)).await
-    {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(err) => {
-            tracing::warn!(%err, "thumb worker failed");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+    let bytes =
+        match tokio::task::spawn_blocking(move || crate::server::cached_jpeg_thumb(&path)).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(err) => {
+                tracing::warn!(%err, "thumb worker failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
     let mut response = bytes_response(
         method,
         StatusCode::OK,
@@ -316,7 +357,11 @@ async fn serve_file(method: &Method, path: PathBuf, range_header: Option<&str>) 
     };
     let content_type = content_type_for(&path);
     let media = content_type.starts_with("audio/") || content_type.starts_with("video/");
-    let ceiling = if media { MAX_MEDIA_BYTES } else { MAX_RESPONSE_BYTES };
+    let ceiling = if media {
+        MAX_MEDIA_BYTES
+    } else {
+        MAX_RESPONSE_BYTES
+    };
     let (status, start, end) = if let Some(header) = range_header {
         match parse_byte_range(header, total, ceiling) {
             Some((start, end)) => (StatusCode::PARTIAL_CONTENT, start, end),
@@ -425,7 +470,12 @@ fn html(method: &Method, status: StatusCode, body: &str) -> Response {
     bytes_response(method, status, "text/html; charset=utf-8", body.as_bytes())
 }
 
-fn bytes_response(method: &Method, status: StatusCode, content_type: &str, body: &[u8]) -> Response {
+fn bytes_response(
+    method: &Method,
+    status: StatusCode,
+    content_type: &str,
+    body: &[u8],
+) -> Response {
     let payload = if method == Method::HEAD {
         Body::empty()
     } else {
@@ -533,6 +583,7 @@ struct PublicItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::p2p::integrity::MERKLE_CHUNK_SIZE;
     use axum::routing::{get, post};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -549,7 +600,9 @@ mod tests {
     async fn serves_index_and_blocks_traversal() {
         let root = std::env::temp_dir().join(format!("popstall-http-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&root).await;
-        tokio::fs::create_dir_all(root.join("nested")).await.unwrap();
+        tokio::fs::create_dir_all(root.join("nested"))
+            .await
+            .unwrap();
         tokio::fs::write(root.join("index.html"), b"hello-stall")
             .await
             .unwrap();
@@ -689,5 +742,93 @@ mod tests {
         assert!(escaped.contains("400"), "{escaped}");
 
         host.shutdown();
+    }
+
+    #[tokio::test]
+    async fn digest_api_uses_index_and_app_returns_none() {
+        let root = std::env::temp_dir().join(format!("popstall-digest-api-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.txt"), b"abc").unwrap();
+
+        let (shutdown, _) = watch::channel(false);
+        let host = StaticHost {
+            root_label: root.display().to_string(),
+            mode_label: "digest-test".to_string(),
+            local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            router: Router::new(),
+            shutdown,
+            integrity: Some(Arc::new(IntegrityIndex::new(root.clone()))),
+        };
+        let digest = host.digest_for("/note.txt").await.unwrap();
+        assert_eq!(
+            digest.to_hex(),
+            "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
+        );
+        assert!(host.digest_for("/../outside.txt").await.is_none());
+
+        let (app_shutdown, _) = watch::channel(false);
+        let app = StaticHost {
+            root_label: "app".to_string(),
+            mode_label: "app".to_string(),
+            local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            router: Router::new(),
+            shutdown: app_shutdown,
+            integrity: None,
+        };
+        assert!(app.digest_for("/note.txt").await.is_none());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn merkle_api_uses_index_and_app_returns_none() {
+        let root = std::env::temp_dir().join(format!("popstall-merkle-api-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let bytes = vec![0x5a; 2 * MERKLE_CHUNK_SIZE + 31];
+        std::fs::write(root.join("clip.bin"), &bytes).unwrap();
+
+        let (shutdown, _) = watch::channel(false);
+        let host = StaticHost {
+            root_label: root.display().to_string(),
+            mode_label: "merkle-test".to_string(),
+            local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            router: Router::new(),
+            shutdown,
+            integrity: Some(Arc::new(IntegrityIndex::new(root.clone()))),
+        };
+        let tree = host.merkle_tree_for("/clip.bin").await.unwrap();
+        let chunk = u64::try_from(MERKLE_CHUNK_SIZE).unwrap();
+        let start = chunk - 7;
+        let end = chunk + 11;
+        let proof = host
+            .merkle_proof_for("/clip.bin", start, end)
+            .await
+            .unwrap();
+        let slice = &bytes[usize::try_from(start).unwrap()..usize::try_from(end).unwrap()];
+        tree.root().verify_range(&proof, slice).unwrap();
+        assert_eq!(proof.total_len, u64::try_from(bytes.len()).unwrap());
+
+        assert!(host.merkle_tree_for("/../outside.bin").await.is_none());
+        assert!(
+            host.merkle_proof_for("/%2e%2e/outside.bin", 0, 1)
+                .await
+                .is_none()
+        );
+
+        let (app_shutdown, _) = watch::channel(false);
+        let app = StaticHost {
+            root_label: "app".to_string(),
+            mode_label: "app".to_string(),
+            local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            router: Router::new(),
+            shutdown: app_shutdown,
+            integrity: None,
+        };
+        assert!(app.merkle_tree_for("/clip.bin").await.is_none());
+        assert!(app.merkle_proof_for("/clip.bin", 0, 1).await.is_none());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -1,9 +1,8 @@
 use std::path::PathBuf;
 
-use iroh::endpoint::Connection;
 use tokio::sync::{Mutex, OnceCell};
 
-use crate::p2p::Node;
+use crate::p2p::{GuestLink, Node};
 use crate::proxy::GuestProxy;
 use crate::server::StaticHost;
 
@@ -30,7 +29,7 @@ pub struct StageSession {
 
 pub struct GuestSession {
     pub proxy: GuestProxy,
-    pub connection: Connection,
+    pub link: GuestLink,
     pub endpoint_id: String,
     pub title: String,
     pub password: String,
@@ -63,6 +62,6 @@ impl AppState {
 impl GuestSession {
     pub fn shutdown(self) {
         let _ = self.proxy.shutdown_handle().send(true);
-        self.connection.close(0u8.into(), b"closed");
+        self.link.connection.close(0u8.into(), b"closed");
     }
 }
